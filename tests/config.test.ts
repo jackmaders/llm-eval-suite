@@ -55,6 +55,54 @@ describe("parseLmsLsModels", () => {
   test("returns an empty list for blank output", () => {
     expect(parseLmsLsModels("   \n  ")).toEqual([]);
   });
+
+  test("flattens the real `--variants`-grouped shape into one entry per quantization", () => {
+    // Trimmed from an actual `lms ls --json --variants` run: each top-level
+    // entry groups a base model's summary under `model` alongside every
+    // individually-downloaded quantization under `variants`.
+    const raw = JSON.stringify([
+      {
+        model: {
+          type: "llm",
+          modelKey: "qwen/qwen3.6-27b",
+          quantization: { name: "Q4_K_M", bits: 4 },
+          variants: ["qwen/qwen3.6-27b@q4_k_m", "qwen/qwen3.6-27b@q6_k"],
+          selectedVariant: "qwen/qwen3.6-27b@q4_k_m",
+        },
+        variants: [
+          { type: "llm", modelKey: "qwen/qwen3.6-27b@q4_k_m", quantization: { name: "Q4_K_M", bits: 4 } },
+          { type: "llm", modelKey: "qwen/qwen3.6-27b@q6_k", quantization: { name: "Q6_K", bits: 6 } },
+        ],
+      },
+      {
+        model: {
+          type: "llm",
+          modelKey: "mistralai/codestral-22b-v0.1",
+          quantization: { name: "Q4_K_M", bits: 4 },
+          variants: ["mistralai/codestral-22b-v0.1@q4_k_m"],
+          selectedVariant: "mistralai/codestral-22b-v0.1@q4_k_m",
+        },
+        variants: [
+          { type: "llm", modelKey: "mistralai/codestral-22b-v0.1@q4_k_m", quantization: { name: "Q4_K_M", bits: 4 } },
+        ],
+      },
+    ]);
+
+    expect(parseLmsLsModels(raw)).toEqual([
+      { modelKey: "qwen/qwen3.6-27b@q4_k_m", quant: "Q4_K_M" },
+      { modelKey: "qwen/qwen3.6-27b@q6_k", quant: "Q6_K" },
+      { modelKey: "mistralai/codestral-22b-v0.1@q4_k_m", quant: "Q4_K_M" },
+    ]);
+  });
+
+  test("throws on a recognized-JSON-but-unexpected shape instead of silently mangling it into text lines", () => {
+    // Regression test: previously, any error while mapping a valid-but-odd
+    // JSON shape was swallowed and the whole raw payload got re-parsed as
+    // newline-separated text, producing one giant garbage "model key" out of
+    // the entire JSON blob — which was then handed straight to `lms load`.
+    const raw = JSON.stringify([{ nothingRecognizable: true }]);
+    expect(() => parseLmsLsModels(raw)).toThrow(/unrecognized/i);
+  });
 });
 
 describe("discoverModels", () => {
@@ -65,8 +113,13 @@ describe("discoverModels", () => {
         calls.push({ cmd, args });
         return {
           stdout: JSON.stringify([
-            { path: "publisher/model-a-GGUF/model-a.Q4_K_M.gguf", quantization: "Q4_K_M" },
-            { path: "publisher/model-a-GGUF/model-a.Q8_0.gguf", quantization: "Q8_0" },
+            {
+              model: { modelKey: "publisher/model-a-GGUF", quantization: { name: "Q4_K_M", bits: 4 } },
+              variants: [
+                { modelKey: "publisher/model-a-GGUF@q4_k_m", quantization: { name: "Q4_K_M", bits: 4 } },
+                { modelKey: "publisher/model-a-GGUF@q8_0", quantization: { name: "Q8_0", bits: 8 } },
+              ],
+            },
           ]),
           stderr: "",
           exitCode: 0,
@@ -77,7 +130,7 @@ describe("discoverModels", () => {
     const models = await discoverModels(runner);
     expect(calls[0]).toEqual({ cmd: "lms", args: ["ls", "--json", "--variants"] });
     expect(models).toHaveLength(2);
-    expect(models[0]).toEqual({ modelKey: "publisher/model-a-GGUF/model-a.Q4_K_M.gguf", quant: "Q4_K_M" });
+    expect(models[0]).toEqual({ modelKey: "publisher/model-a-GGUF@q4_k_m", quant: "Q4_K_M" });
   });
 
   test("propagates a non-zero exit code from lms ls as an error", async () => {

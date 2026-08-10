@@ -18,42 +18,82 @@ export function extractQuant(identifier: string): string {
   return match ? match[1]!.toUpperCase() : "unknown";
 }
 
+/** Reads a modelKey + quant off a single "leaf" model object, in whatever shape it's in. */
+function readModelEntry(obj: Record<string, unknown>): ModelConfig | undefined {
+  const modelKey = typeof obj.modelKey === "string" ? obj.modelKey : typeof obj.path === "string" ? obj.path : undefined;
+  if (!modelKey) return undefined;
+
+  const quantization = obj.quantization;
+  let quant: string | undefined;
+  if (typeof quantization === "string") {
+    quant = quantization;
+  } else if (quantization && typeof quantization === "object" && typeof (quantization as Record<string, unknown>).name === "string") {
+    quant = (quantization as Record<string, unknown>).name as string;
+  } else if (typeof obj.quant === "string") {
+    quant = obj.quant;
+  }
+
+  return { modelKey, quant: quant ?? extractQuant(modelKey) };
+}
+
+/** Flattens one `lms ls --json --variants` array entry into its evaluable model(s). */
+function readListEntry(item: unknown): ModelConfig[] {
+  if (typeof item === "string") {
+    return [{ modelKey: item, quant: extractQuant(item) }];
+  }
+  if (!item || typeof item !== "object") {
+    throw new Error(`unrecognized \`lms ls\` entry: ${JSON.stringify(item)}`);
+  }
+
+  const obj = item as Record<string, unknown>;
+
+  // `--variants` groups by base model as { model: {...}, variants: [...] }.
+  // Each entry in `variants` carries its own fully-qualified, individually
+  // loadable "modelKey@quant" — that's what actually needs to be evaluated,
+  // not the ungrouped `model` summary (which lacks the quant suffix `lms
+  // load` needs to pick a specific variant).
+  if (Array.isArray(obj.variants)) {
+    const models = obj.variants.flatMap((variant) => {
+      if (!variant || typeof variant !== "object") return [];
+      const model = readModelEntry(variant as Record<string, unknown>);
+      return model ? [model] : [];
+    });
+    if (models.length > 0) return models;
+  }
+
+  const inner = obj.model && typeof obj.model === "object" ? (obj.model as Record<string, unknown>) : obj;
+  const model = readModelEntry(inner);
+  if (!model) throw new Error(`unrecognized \`lms ls\` entry: ${JSON.stringify(item)}`);
+  return [model];
+}
+
 /**
- * Parses the stdout of `lms ls --json --variants` into ModelConfig[]. Tolerates
- * a plain JSON array of path strings, an array of objects carrying `path` or
- * `modelKey` (and optionally an explicit `quantization`/`quant` field), and
- * falls back to line-based text parsing if the output isn't JSON at all.
+ * Parses the stdout of `lms ls --json --variants` into ModelConfig[]. Handles
+ * both a flat array of model objects/paths and the `--variants`-grouped
+ * `{ model, variants }` shape LM Studio actually emits, and falls back to
+ * line-based text parsing only when the output isn't JSON at all — a
+ * recognized-but-unexpected JSON shape throws instead of being silently
+ * misread as a list of plain-text lines.
  */
 export function parseLmsLsModels(raw: string): ModelConfig[] {
   const trimmed = raw.trim();
   if (trimmed.length === 0) return [];
 
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(trimmed);
-    if (Array.isArray(parsed)) {
-      return parsed.map((item): ModelConfig => {
-        if (typeof item === "string") {
-          return { modelKey: item, quant: extractQuant(item) };
-        }
-        if (item && typeof item === "object") {
-          const obj = item as Record<string, unknown>;
-          const modelKey = typeof obj.path === "string" ? obj.path : typeof obj.modelKey === "string" ? obj.modelKey : undefined;
-          if (!modelKey) throw new Error("unrecognized entry shape");
-          const explicitQuant = typeof obj.quantization === "string" ? obj.quantization : typeof obj.quant === "string" ? obj.quant : undefined;
-          return { modelKey, quant: explicitQuant ?? extractQuant(modelKey) };
-        }
-        throw new Error("unrecognized entry shape");
-      });
-    }
+    parsed = JSON.parse(trimmed);
   } catch {
-    // Fall through to line-based parsing below.
+    return trimmed
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .map((line) => ({ modelKey: line, quant: extractQuant(line) }));
   }
 
-  return trimmed
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .map((line) => ({ modelKey: line, quant: extractQuant(line) }));
+  if (!Array.isArray(parsed)) {
+    throw new Error("expected `lms ls --json` output to be a JSON array");
+  }
+  return parsed.flatMap(readListEntry);
 }
 
 /**
