@@ -79,4 +79,77 @@ describe("generateMarkdownReport", () => {
     expect(() => generateMarkdownReport(empty)).not.toThrow();
     expect(generateMarkdownReport(empty)).toContain("No candidate models");
   });
+
+  test("has no quantization-note callout when nothing warrants one", () => {
+    const report = generateMarkdownReport(state);
+    expect(report).not.toContain("Quantization Notes");
+  });
+
+  test("flags a model that ran close to its RAM/VRAM ceiling with a smaller-quant suggestion", () => {
+    const tight: PipelineState = {
+      lastUpdated: "now",
+      completedPhases: {
+        "model-tight": {
+          phase1Passed: true,
+          phase2Passed: true,
+          phase3Profile: {
+            modelKey: "model-tight",
+            quant: "Q4_K_M",
+            verifiedGpuOffload: "max",
+            kvCacheQuant: "Q8_0",
+            maxRecommendedContext: 8192,
+            ladderHistory: [
+              {
+                contextLength: 8192,
+                prefillTokPerSec: 400,
+                decodeTokPerSec: 20,
+                timeToFirstTokenMs: 100,
+                snapshot: { ramUsedPercent: 88, ramUsedGB: 28, dedicatedVramFreeMB: 1200, sharedGpuMemoryMB: 0 },
+                speedDropPercent: 0,
+              },
+            ],
+          },
+        },
+      },
+    };
+    const report = generateMarkdownReport(tight);
+    expect(report).toContain("Quantization Notes");
+    expect(report).toContain("model-tight");
+    expect(report).toContain("Q4_K_S");
+    expect(report).toMatch(/RAM.*ceiling|ceiling.*RAM|close to its RAM/i);
+  });
+
+  test("flags a model with unused headroom with a larger-quant suggestion", () => {
+    const loose: PipelineState = {
+      lastUpdated: "now",
+      completedPhases: {
+        "model-loose": {
+          phase1Passed: true,
+          phase2Passed: true,
+          phase3Profile: {
+            modelKey: "model-loose",
+            quant: "Q4_K_M",
+            verifiedGpuOffload: "max",
+            kvCacheQuant: "Q8_0",
+            maxRecommendedContext: 8192,
+            ladderHistory: [
+              {
+                contextLength: 8192,
+                prefillTokPerSec: 400,
+                decodeTokPerSec: 20,
+                timeToFirstTokenMs: 100,
+                snapshot: { ramUsedPercent: 15, ramUsedGB: 5, dedicatedVramFreeMB: 9000, sharedGpuMemoryMB: 0 },
+                speedDropPercent: 0,
+              },
+            ],
+          },
+        },
+      },
+    };
+    const report = generateMarkdownReport(loose);
+    expect(report).toContain("Quantization Notes");
+    expect(report).toContain("model-loose");
+    expect(report).toContain("Q5_K_S");
+    expect(report).toMatch(/headroom/i);
+  });
 });

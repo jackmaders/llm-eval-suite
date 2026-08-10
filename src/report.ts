@@ -2,9 +2,11 @@
 // and user story 14. Pure formatting over PipelineState — no I/O here so it
 // stays trivially testable; index.ts/orchestrator.ts own writing the file.
 
+import { recommendQuantChange } from "./recommendation";
 import type { CompletedPhases, PipelineState } from "./types";
 
 const PLACEHOLDER = "—";
+const TABLE_COLUMN_COUNT = 9;
 
 export function buildMarkdownTable(headers: string[], rows: string[][]): string {
   const headerLine = `| ${headers.join(" | ")} |`;
@@ -17,10 +19,19 @@ function round1(n: number): string {
   return n.toFixed(1);
 }
 
+/** Short table-cell label for a quant recommendation; "—" when none applies. */
+function quantNoteLabel(profile: CompletedPhases["phase3Profile"]): string {
+  if (!profile) return PLACEHOLDER;
+  const rec = recommendQuantChange(profile);
+  if (!rec) return PLACEHOLDER;
+  const arrow = rec.direction === "more-compression" ? "⬇" : "⬆";
+  return rec.suggestedQuant ? `${arrow} try ${rec.suggestedQuant}` : `${arrow} ${rec.direction}`;
+}
+
 function renderRow(modelKey: string, phases: CompletedPhases): string[] {
   if (phases.discardedAt) {
     const stage = phases.discardedAt === "DISCARDED_PHASE1" ? "Phase 1" : "Phase 2";
-    return [modelKey, `Discarded (${stage})`, PLACEHOLDER, PLACEHOLDER, PLACEHOLDER, PLACEHOLDER, PLACEHOLDER, PLACEHOLDER];
+    return [modelKey, `Discarded (${stage})`, ...Array(TABLE_COLUMN_COUNT - 2).fill(PLACEHOLDER)];
   }
 
   const phase1 = phases.phase1Passed === undefined ? PLACEHOLDER : phases.phase1Passed ? "Pass" : "Fail";
@@ -35,9 +46,25 @@ function renderRow(modelKey: string, phases: CompletedPhases): string[] {
     profile ? String(profile.maxRecommendedContext) : PLACEHOLDER,
     profile ? profile.verifiedGpuOffload : PLACEHOLDER,
     profile ? profile.kvCacheQuant : PLACEHOLDER,
+    quantNoteLabel(profile),
     metrics ? `${round1(metrics.passRatePercent)}%` : PLACEHOLDER,
     metrics ? `${round1(metrics.avgDecodeSpeed)} tok/s (decay ${round1(metrics.thermalDecayPercent)}%)` : PLACEHOLDER,
   ];
+}
+
+/** Full-sentence quantization-note callouts for the section below the table. */
+function renderQuantizationNotes(modelKeys: string[], completedPhases: PipelineState["completedPhases"]): string[] {
+  const notes = modelKeys.flatMap((modelKey) => {
+    const profile = completedPhases[modelKey]?.phase3Profile;
+    if (!profile) return [];
+    const rec = recommendQuantChange(profile);
+    if (!rec) return [];
+    const suggestion = rec.suggestedQuant ? ` Try ${rec.suggestedQuant} instead of ${profile.quant}.` : "";
+    return [`- **${modelKey}**: ${rec.reason}${suggestion}`];
+  });
+
+  if (notes.length === 0) return [];
+  return ["", "## Quantization Notes", "", ...notes];
 }
 
 /** Renders the full comparison report written to data/report_<timestamp>.md. */
@@ -62,6 +89,7 @@ export function generateMarkdownReport(state: PipelineState): string {
     "Max Context",
     "GPU Offload",
     "KV Cache",
+    "Quant Note",
     "Aider Pass Rate",
     "Decode Speed",
   ];
@@ -73,6 +101,7 @@ export function generateMarkdownReport(state: PipelineState): string {
     "_Max Context reflects the last context-ladder step that did not trip a guardrail " +
       "(system RAM ≥ 90%, shared GPU memory ≥ 300MB, or ≥ 15% decode-speed regression vs. the 8k baseline)._",
   );
+  lines.push(...renderQuantizationNotes(modelKeys, state.completedPhases));
 
   return lines.join("\n");
 }
