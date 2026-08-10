@@ -1,0 +1,268 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { ServerCrashError } from "../src/apiClient";
+import { runPipeline } from "../src/orchestrator";
+import { loadState, saveStateAtomic } from "../src/state";
+import type { CommandRunner } from "../src/subprocess";
+import type { ModelConfig, Phase1Result, Phase2Result, PipelineState } from "../src/types";
+
+const workDirs: string[] = [];
+afterEach(async () => {
+  await Promise.all(workDirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
+});
+
+function makeWorkDir(): { configPath: string; statePath: string; dataDir: string } {
+  const dir = join(tmpdir(), `llm-eval-suite-orch-${crypto.randomUUID()}`);
+  workDirs.push(dir);
+  return { configPath: join(dir, "models.json"), statePath: join(dir, ".pipeline_state.json"), dataDir: dir };
+}
+
+const noopRunner: CommandRunner = { run: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }) };
+
+function baseDeps(models: ModelConfig[]) {
+  const paths = makeWorkDir();
+  return {
+    paths,
+    deps: {
+      configPath: paths.configPath,
+      statePath: paths.statePath,
+      dataDir: paths.dataDir,
+      resume: false,
+      runner: {
+        run: async (cmd: string, args: string[]) => {
+          if (cmd === "lms" && args[0] === "ls") {
+            return { stdout: JSON.stringify(models.map((m) => m.modelKey)), stderr: "", exitCode: 0 };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      } as CommandRunner,
+      client: { healthCheck: async () => true } as never,
+      hardware: { getSnapshot: async () => ({ ramUsedPercent: 30, ramUsedGB: 10, dedicatedVramFreeMB: 9000, sharedGpuMemoryMB: 0 }) },
+    },
+  };
+}
+
+async function writeModelsConfig(path: string, models: ModelConfig[]) {
+  await Bun.write(path, JSON.stringify(models));
+}
+
+describe("runPipeline", () => {
+  test("runs every phase for a model that clears every gate", async () => {
+    const models: ModelConfig[] = [{ modelKey: "model-a", quant: "Q4_K_M" }];
+    const { paths, deps } = baseDeps(models);
+    await writeModelsConfig(paths.configPath, models);
+
+    const calls: string[] = [];
+    const result = await runPipeline({
+      ...deps,
+      now: () => "2026-08-10T00:00:00.000Z",
+      phase1: async (m): Promise<Phase1Result> => {
+        calls.push("phase1");
+        return { modelKey: m.modelKey, tokPerSec: 20, passed: true };
+      },
+      phase2: async (m): Promise<Phase2Result> => {
+        calls.push("phase2");
+        return { modelKey: m.modelKey, passed: true };
+      },
+      phase3: async (m) => {
+        calls.push("phase3");
+        return {
+          modelKey: m.modelKey,
+          quant: m.quant,
+          verifiedGpuOffload: "max",
+          kvCacheQuant: "Q8_0" as const,
+          maxRecommendedContext: 32768,
+          ladderHistory: [],
+        };
+      },
+      phase4: async (m) => {
+        calls.push("phase4");
+        return {
+          modelKey: m.modelKey,
+          passRatePercent: 100,
+          syntaxErrorCount: 0,
+          avgDecodeSpeed: 22,
+          thermalDecayPercent: 1,
+          workspaceDir: "/tmp/x",
+        };
+      },
+    });
+
+    expect(calls).toEqual(["phase1", "phase2", "phase3", "phase4"]);
+    expect(result.state.completedPhases["model-a"]?.phase4Metrics?.passRatePercent).toBe(100);
+    expect(result.reportMarkdown).toContain("model-a");
+
+    const persisted = await loadState(paths.statePath);
+    expect(persisted?.completedPhases["model-a"]?.phase3Profile?.maxRecommendedContext).toBe(32768);
+  });
+
+  test("discards a model at phase 1 and skips later phases", async () => {
+    const models: ModelConfig[] = [{ modelKey: "model-slow", quant: "Q4_K_M" }];
+    const { paths, deps } = baseDeps(models);
+    await writeModelsConfig(paths.configPath, models);
+
+    const calls: string[] = [];
+    const result = await runPipeline({
+      ...deps,
+      phase1: async (m): Promise<Phase1Result> => {
+        calls.push("phase1");
+        return { modelKey: m.modelKey, tokPerSec: 3, passed: false };
+      },
+      phase2: async () => {
+        calls.push("phase2");
+        throw new Error("should not be called");
+      },
+      phase3: async () => {
+        calls.push("phase3");
+        throw new Error("should not be called");
+      },
+      phase4: async () => {
+        calls.push("phase4");
+        throw new Error("should not be called");
+      },
+    });
+
+    expect(calls).toEqual(["phase1"]);
+    expect(result.state.completedPhases["model-slow"]?.discardedAt).toBe("DISCARDED_PHASE1");
+  });
+
+  test("discards a model at phase 2 and skips phase 3/4", async () => {
+    const models: ModelConfig[] = [{ modelKey: "model-b", quant: "Q4_K_M" }];
+    const { paths, deps } = baseDeps(models);
+    await writeModelsConfig(paths.configPath, models);
+
+    const calls: string[] = [];
+    const result = await runPipeline({
+      ...deps,
+      phase1: async (m): Promise<Phase1Result> => {
+        calls.push("phase1");
+        return { modelKey: m.modelKey, tokPerSec: 20, passed: true };
+      },
+      phase2: async (m): Promise<Phase2Result> => {
+        calls.push("phase2");
+        return { modelKey: m.modelKey, passed: false, reason: "invalid JSON" };
+      },
+      phase3: async () => {
+        calls.push("phase3");
+        throw new Error("should not be called");
+      },
+      phase4: async () => {
+        calls.push("phase4");
+        throw new Error("should not be called");
+      },
+    });
+
+    expect(calls).toEqual(["phase1", "phase2"]);
+    expect(result.state.completedPhases["model-b"]?.discardedAt).toBe("DISCARDED_PHASE2");
+  });
+
+  test("--resume skips phases already recorded in state", async () => {
+    const models: ModelConfig[] = [{ modelKey: "model-a", quant: "Q4_K_M" }];
+    const { paths, deps } = baseDeps(models);
+    await writeModelsConfig(paths.configPath, models);
+
+    const priorState: PipelineState = {
+      lastUpdated: "earlier",
+      completedPhases: { "model-a": { phase1Passed: true, phase2Passed: true } },
+    };
+    await saveStateAtomic(paths.statePath, priorState);
+
+    const calls: string[] = [];
+    await runPipeline({
+      ...deps,
+      resume: true,
+      phase1: async () => {
+        calls.push("phase1");
+        throw new Error("should not re-run");
+      },
+      phase2: async () => {
+        calls.push("phase2");
+        throw new Error("should not re-run");
+      },
+      phase3: async (m) => {
+        calls.push("phase3");
+        return {
+          modelKey: m.modelKey,
+          quant: m.quant,
+          verifiedGpuOffload: "max",
+          kvCacheQuant: "Q8_0" as const,
+          maxRecommendedContext: 16384,
+          ladderHistory: [],
+        };
+      },
+      phase4: async (m) => {
+        calls.push("phase4");
+        return {
+          modelKey: m.modelKey,
+          passRatePercent: 80,
+          syntaxErrorCount: 0,
+          avgDecodeSpeed: 18,
+          thermalDecayPercent: 2,
+          workspaceDir: "/tmp/x",
+        };
+      },
+    });
+
+    expect(calls).toEqual(["phase3", "phase4"]);
+  });
+
+  test("aborts the whole run when the server crashes mid-pipeline", async () => {
+    const models: ModelConfig[] = [
+      { modelKey: "model-a", quant: "Q4_K_M" },
+      { modelKey: "model-b", quant: "Q4_K_M" },
+    ];
+    const { paths, deps } = baseDeps(models);
+    await writeModelsConfig(paths.configPath, models);
+
+    const calls: string[] = [];
+    await expect(
+      runPipeline({
+        ...deps,
+        phase1: async (m) => {
+          calls.push(`phase1:${m.modelKey}`);
+          if (m.modelKey === "model-b") throw new ServerCrashError("port 1234 unbound");
+          return { modelKey: m.modelKey, tokPerSec: 20, passed: true };
+        },
+        phase2: async (m) => ({ modelKey: m.modelKey, passed: true }),
+        phase3: async (m) => ({
+          modelKey: m.modelKey,
+          quant: m.quant,
+          verifiedGpuOffload: "max",
+          kvCacheQuant: "Q8_0" as const,
+          maxRecommendedContext: 8192,
+          ladderHistory: [],
+        }),
+        phase4: async (m) => ({
+          modelKey: m.modelKey,
+          passRatePercent: 100,
+          syntaxErrorCount: 0,
+          avgDecodeSpeed: 10,
+          thermalDecayPercent: 0,
+          workspaceDir: "/tmp/x",
+        }),
+      }),
+    ).rejects.toBeInstanceOf(ServerCrashError);
+
+    expect(calls).toEqual(["phase1:model-a", "phase1:model-b"]);
+    const persisted = await loadState(paths.statePath);
+    expect(persisted?.completedPhases["model-a"]?.phase4Metrics).toBeDefined();
+    expect(persisted?.completedPhases["model-b"]).toBeUndefined();
+  });
+
+  test("halts before running when a configured model is missing from lms ls", async () => {
+    const models: ModelConfig[] = [{ modelKey: "not-installed", quant: "Q4_K_M" }];
+    const { paths, deps } = baseDeps([]);
+    await writeModelsConfig(paths.configPath, models);
+
+    await expect(
+      runPipeline({
+        ...deps,
+        phase1: async () => {
+          throw new Error("should not run");
+        },
+      }),
+    ).rejects.toThrow(/not-installed/);
+  });
+});
