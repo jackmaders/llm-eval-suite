@@ -2,6 +2,7 @@
 // against persisted state, honoring --resume. See spec "Pipeline Stage
 // Logic" end-to-end and user stories 12-14.
 
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { LmStudioClient } from "./apiClient";
 import { discoverModels } from "./config";
@@ -60,6 +61,10 @@ export async function runPipeline(deps: OrchestratorDeps): Promise<OrchestratorR
   const phase2Fn = deps.phase2 ?? runPhase2;
   const phase3Fn = deps.phase3 ?? runPhase3;
   const phase4Fn = deps.phase4 ?? runPhase4;
+
+  // data/ is gitignored rather than checked in, so create it on demand
+  // instead of assuming it already exists.
+  await mkdir(deps.dataDir, { recursive: true });
 
   // User story 12: a dead/unbound LM Studio server must abort immediately,
   // before any model is loaded.
