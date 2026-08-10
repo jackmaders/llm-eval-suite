@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { discoverModels, extractQuant, parseLmsLsModels } from "../src/config";
+import { discoverModels, extractQuant, findUnevaluatedVariantWarnings, parseLmsLsModels } from "../src/config";
 import type { CommandRunner } from "../src/subprocess";
 
 describe("extractQuant", () => {
@@ -56,10 +56,12 @@ describe("parseLmsLsModels", () => {
     expect(parseLmsLsModels("   \n  ")).toEqual([]);
   });
 
-  test("flattens the real `--variants`-grouped shape into one entry per quantization", () => {
+  test("reads the real `--variants`-grouped shape as one candidate per base model", () => {
     // Trimmed from an actual `lms ls --json --variants` run: each top-level
     // entry groups a base model's summary under `model` alongside every
-    // individually-downloaded quantization under `variants`.
+    // individually-downloaded quantization under `variants`. Only `model`'s
+    // own (unsuffixed) modelKey is ever accepted by `lms load` — see the
+    // file header note on lmstudio-ai/lmstudio-bug-tracker#1462.
     const raw = JSON.stringify([
       {
         model: {
@@ -89,10 +91,25 @@ describe("parseLmsLsModels", () => {
     ]);
 
     expect(parseLmsLsModels(raw)).toEqual([
-      { modelKey: "qwen/qwen3.6-27b@q4_k_m", quant: "Q4_K_M" },
-      { modelKey: "qwen/qwen3.6-27b@q6_k", quant: "Q6_K" },
-      { modelKey: "mistralai/codestral-22b-v0.1@q4_k_m", quant: "Q4_K_M" },
+      { modelKey: "qwen/qwen3.6-27b", quant: "Q4_K_M" },
+      { modelKey: "mistralai/codestral-22b-v0.1", quant: "Q4_K_M" },
     ]);
+  });
+
+  test("regression: does not pass an unsuffixed @quant model key to lms load", () => {
+    // The original fix for the grouped-shape parsing bug used
+    // `variants[].modelKey` (e.g. "model@q4_k_m"), which `lms load` rejects
+    // outright ("Model not found") because it can only resolve a base
+    // model's own modelKey — never a variant-qualified one.
+    const raw = JSON.stringify([
+      {
+        model: { modelKey: "mistralai/magistral-small-2509", quantization: { name: "Q4_K_M", bits: 4 } },
+        variants: [{ modelKey: "mistralai/magistral-small-2509@q4_k_m", quantization: { name: "Q4_K_M", bits: 4 } }],
+      },
+    ]);
+    const models = parseLmsLsModels(raw);
+    expect(models).toEqual([{ modelKey: "mistralai/magistral-small-2509", quant: "Q4_K_M" }]);
+    expect(models[0]?.modelKey).not.toContain("@");
   });
 
   test("throws on a recognized-JSON-but-unexpected shape instead of silently mangling it into text lines", () => {
@@ -105,8 +122,46 @@ describe("parseLmsLsModels", () => {
   });
 });
 
+describe("findUnevaluatedVariantWarnings", () => {
+  test("warns about base models with more than one downloaded quantization", () => {
+    const raw = JSON.stringify([
+      {
+        model: {
+          modelKey: "qwen/qwen3.6-27b",
+          quantization: { name: "Q4_K_M", bits: 4 },
+          selectedVariant: "qwen/qwen3.6-27b@q4_k_m",
+        },
+        variants: [
+          { modelKey: "qwen/qwen3.6-27b@q4_k_m", quantization: { name: "Q4_K_M", bits: 4 } },
+          { modelKey: "qwen/qwen3.6-27b@q6_k", quantization: { name: "Q6_K", bits: 6 } },
+        ],
+      },
+    ]);
+    const warnings = findUnevaluatedVariantWarnings(raw);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("qwen/qwen3.6-27b");
+    expect(warnings[0]).toContain("Q4_K_M, Q6_K");
+    expect(warnings[0]).toContain("qwen/qwen3.6-27b@q4_k_m");
+  });
+
+  test("has no warnings for base models with only one downloaded quantization", () => {
+    const raw = JSON.stringify([
+      {
+        model: { modelKey: "mistralai/codestral-22b-v0.1", quantization: { name: "Q4_K_M", bits: 4 } },
+        variants: [{ modelKey: "mistralai/codestral-22b-v0.1@q4_k_m", quantization: { name: "Q4_K_M", bits: 4 } }],
+      },
+    ]);
+    expect(findUnevaluatedVariantWarnings(raw)).toEqual([]);
+  });
+
+  test("returns no warnings for non-JSON or non-grouped output", () => {
+    expect(findUnevaluatedVariantWarnings("not json")).toEqual([]);
+    expect(findUnevaluatedVariantWarnings(JSON.stringify(["model-a"]))).toEqual([]);
+  });
+});
+
 describe("discoverModels", () => {
-  test("expands quantization variants via `lms ls --json --variants`", async () => {
+  test("discovers one candidate per base model via `lms ls --json --variants`", async () => {
     const calls: Array<{ cmd: string; args: string[] }> = [];
     const runner: CommandRunner = {
       run: async (cmd, args) => {
@@ -114,7 +169,11 @@ describe("discoverModels", () => {
         return {
           stdout: JSON.stringify([
             {
-              model: { modelKey: "publisher/model-a-GGUF", quantization: { name: "Q4_K_M", bits: 4 } },
+              model: {
+                modelKey: "publisher/model-a-GGUF",
+                quantization: { name: "Q4_K_M", bits: 4 },
+                selectedVariant: "publisher/model-a-GGUF@q4_k_m",
+              },
               variants: [
                 { modelKey: "publisher/model-a-GGUF@q4_k_m", quantization: { name: "Q4_K_M", bits: 4 } },
                 { modelKey: "publisher/model-a-GGUF@q8_0", quantization: { name: "Q8_0", bits: 8 } },
@@ -129,8 +188,7 @@ describe("discoverModels", () => {
 
     const models = await discoverModels(runner);
     expect(calls[0]).toEqual({ cmd: "lms", args: ["ls", "--json", "--variants"] });
-    expect(models).toHaveLength(2);
-    expect(models[0]).toEqual({ modelKey: "publisher/model-a-GGUF@q4_k_m", quant: "Q4_K_M" });
+    expect(models).toEqual([{ modelKey: "publisher/model-a-GGUF", quant: "Q4_K_M" }]);
   });
 
   test("propagates a non-zero exit code from lms ls as an error", async () => {

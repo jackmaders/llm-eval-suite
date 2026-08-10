@@ -1,6 +1,15 @@
 // Live model discovery against LM Studio's local model store. Candidates are
-// no longer hand-typed in a static file — every downloaded GGUF quantization
-// variant `lms ls --json --variants` reports becomes a candidate automatically.
+// no longer hand-typed in a static file — every downloaded base model
+// `lms ls --json --variants` reports becomes a candidate automatically.
+//
+// IMPORTANT: `lms load` and the `/api/v1/models/load` REST endpoint cannot
+// target a specific quantization variant of a model — this is a confirmed,
+// currently-open upstream limitation (lmstudio-ai/lmstudio-bug-tracker#1462).
+// Both only accept a base model key and always resolve to whichever variant
+// is currently marked "selected" for that model inside the LM Studio app,
+// regardless of any "@quant" suffix passed in. So each base model can only
+// contribute ONE evaluable candidate per run — the currently selected
+// variant — even if several quantizations are downloaded locally.
 
 import type { CommandRunner } from "./subprocess";
 import type { ModelConfig } from "./types";
@@ -36,44 +45,34 @@ function readModelEntry(obj: Record<string, unknown>): ModelConfig | undefined {
   return { modelKey, quant: quant ?? extractQuant(modelKey) };
 }
 
-/** Flattens one `lms ls --json --variants` array entry into its evaluable model(s). */
-function readListEntry(item: unknown): ModelConfig[] {
+/**
+ * Reads the single loadable candidate out of one `lms ls --json --variants`
+ * array entry. `--variants` groups each base model as `{ model, variants }`,
+ * but only `model`'s own (unsuffixed) modelKey is ever accepted by `lms
+ * load` — the individual `variants[].modelKey` "@quant" identifiers are
+ * display-only (see the file header note).
+ */
+function readListEntry(item: unknown): ModelConfig {
   if (typeof item === "string") {
-    return [{ modelKey: item, quant: extractQuant(item) }];
+    return { modelKey: item, quant: extractQuant(item) };
   }
   if (!item || typeof item !== "object") {
     throw new Error(`unrecognized \`lms ls\` entry: ${JSON.stringify(item)}`);
   }
 
   const obj = item as Record<string, unknown>;
-
-  // `--variants` groups by base model as { model: {...}, variants: [...] }.
-  // Each entry in `variants` carries its own fully-qualified, individually
-  // loadable "modelKey@quant" — that's what actually needs to be evaluated,
-  // not the ungrouped `model` summary (which lacks the quant suffix `lms
-  // load` needs to pick a specific variant).
-  if (Array.isArray(obj.variants)) {
-    const models = obj.variants.flatMap((variant) => {
-      if (!variant || typeof variant !== "object") return [];
-      const model = readModelEntry(variant as Record<string, unknown>);
-      return model ? [model] : [];
-    });
-    if (models.length > 0) return models;
-  }
-
   const inner = obj.model && typeof obj.model === "object" ? (obj.model as Record<string, unknown>) : obj;
   const model = readModelEntry(inner);
   if (!model) throw new Error(`unrecognized \`lms ls\` entry: ${JSON.stringify(item)}`);
-  return [model];
+  return model;
 }
 
 /**
- * Parses the stdout of `lms ls --json --variants` into ModelConfig[]. Handles
- * both a flat array of model objects/paths and the `--variants`-grouped
- * `{ model, variants }` shape LM Studio actually emits, and falls back to
- * line-based text parsing only when the output isn't JSON at all — a
- * recognized-but-unexpected JSON shape throws instead of being silently
- * misread as a list of plain-text lines.
+ * Parses the stdout of `lms ls --json --variants` into ModelConfig[] — one
+ * entry per base model, using whichever quantization is currently selected
+ * for it. Falls back to line-based text parsing only when the output isn't
+ * JSON at all; a recognized-but-unexpected JSON shape throws instead of
+ * being silently misread as a list of plain-text lines.
  */
 export function parseLmsLsModels(raw: string): ModelConfig[] {
   const trimmed = raw.trim();
@@ -93,19 +92,65 @@ export function parseLmsLsModels(raw: string): ModelConfig[] {
   if (!Array.isArray(parsed)) {
     throw new Error("expected `lms ls --json` output to be a JSON array");
   }
-  return parsed.flatMap(readListEntry);
+  return parsed.map(readListEntry);
 }
 
 /**
- * Discovers every locally-downloaded model+quantization variant by shelling
- * out to `lms ls --json --variants` (the `--variants` flag is what expands
- * each base model into its individually-downloaded quantizations). Throws if
- * the `lms` CLI itself fails, since that means no run can proceed at all.
+ * Scans `lms ls --json --variants` output for base models with more than one
+ * downloaded quantization, and returns one human-readable warning per such
+ * model — since only its currently-selected variant can actually be
+ * evaluated this run (see the file header note). Returns [] for shapes with
+ * no `variants` grouping (nothing to warn about).
+ */
+export function findUnevaluatedVariantWarnings(raw: string): string[] {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return [];
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+
+  const warnings: string[] = [];
+  for (const item of parsed) {
+    if (!item || typeof item !== "object") continue;
+    const obj = item as Record<string, unknown>;
+    const variants = obj.variants;
+    if (!Array.isArray(variants) || variants.length <= 1) continue;
+
+    const modelObj = obj.model && typeof obj.model === "object" ? (obj.model as Record<string, unknown>) : obj;
+    const baseKey = typeof modelObj.modelKey === "string" ? modelObj.modelKey : "unknown model";
+    const selected = typeof modelObj.selectedVariant === "string" ? modelObj.selectedVariant : undefined;
+    const quantNames = variants
+      .map((v) => (v && typeof v === "object" ? readModelEntry(v as Record<string, unknown>)?.quant : undefined))
+      .filter((q): q is string => Boolean(q));
+
+    warnings.push(
+      `"${baseKey}" has ${variants.length} downloaded quantizations (${quantNames.join(", ")}) but only the ` +
+        `currently selected variant${selected ? ` ("${selected}")` : ""} can be evaluated this run — LM Studio's ` +
+        `CLI/API cannot select a specific variant to load (lmstudio-ai/lmstudio-bug-tracker#1462). Switch the ` +
+        `selected variant in LM Studio and re-run to evaluate the others.`,
+    );
+  }
+  return warnings;
+}
+
+/**
+ * Discovers every locally-downloaded base model by shelling out to
+ * `lms ls --json --variants`, logging a warning for any model with
+ * unevaluated quantization variants. Throws if the `lms` CLI itself fails,
+ * since that means no run can proceed at all.
  */
 export async function discoverModels(runner: CommandRunner): Promise<ModelConfig[]> {
   const result = await runner.run("lms", ["ls", "--json", "--variants"]);
   if (result.exitCode !== 0) {
     throw new Error(`\`lms ls\` failed with exit code ${result.exitCode}: ${result.stderr}`);
+  }
+  for (const warning of findUnevaluatedVariantWarnings(result.stdout)) {
+    console.warn(`WARNING: ${warning}`);
   }
   return parseLmsLsModels(result.stdout);
 }
