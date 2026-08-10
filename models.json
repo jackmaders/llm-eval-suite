@@ -1,5 +1,0 @@
-[
-  { "modelKey": "qwen2.5-coder-32b-instruct", "quant": "Q4_K_M" },
-  { "modelKey": "deepseek-coder-v2-lite-instruct", "quant": "Q5_K_M" },
-  { "modelKey": "codestral-22b-v0.1", "quant": "Q4_K_M" }
-]

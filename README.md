@@ -11,8 +11,11 @@ telemetry sampled through PowerShell (`Get-CimInstance`, `Get-Counter`).
 
 ## How it works
 
-Each model listed in `models.json` is pushed through four phases, in order,
-stopping early the moment a model is discarded:
+Candidate models are **discovered live** by shelling out to
+`lms ls --json --variants` — there is no static config file to keep in sync
+with what's actually downloaded. Every GGUF quantization variant LM Studio
+reports locally becomes a candidate and is pushed through four phases, in
+order, stopping early the moment a model is discarded:
 
 1. **Phase 1 — High-Speed Ping Filter**: loads the model at 4096 context and
    requires ≥ 10 tok/sec on a short completion, or it's discarded.
@@ -52,11 +55,12 @@ run.
 ```sh
 bun install
 
-# edit models.json with the modelKey/quant pairs you want to evaluate
+# download whichever GGUF quantizations you want evaluated in LM Studio first —
+# the suite evaluates everything `lms ls --json --variants` reports, with no
+# separate allow-list to maintain
 
 bun run src/index.ts            # fresh run
 bun run src/index.ts --resume   # resume from data/.pipeline_state.json
-bun run src/index.ts --resume --bypass-preflight  # skip the `lms ls` check
 ```
 
 ## Development

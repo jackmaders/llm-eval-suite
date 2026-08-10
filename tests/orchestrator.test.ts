@@ -13,27 +13,25 @@ afterEach(async () => {
   await Promise.all(workDirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
 });
 
-function makeWorkDir(): { configPath: string; statePath: string; dataDir: string } {
+function makeWorkDir(): { statePath: string; dataDir: string } {
   const dir = join(tmpdir(), `llm-eval-suite-orch-${crypto.randomUUID()}`);
   workDirs.push(dir);
-  return { configPath: join(dir, "models.json"), statePath: join(dir, ".pipeline_state.json"), dataDir: dir };
+  return { statePath: join(dir, ".pipeline_state.json"), dataDir: dir };
 }
 
-const noopRunner: CommandRunner = { run: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }) };
-
-function baseDeps(models: ModelConfig[]) {
+/** Simulates the models LM Studio reports via `lms ls --json --variants`. */
+function baseDeps(discoveredModels: ModelConfig[]) {
   const paths = makeWorkDir();
   return {
     paths,
     deps: {
-      configPath: paths.configPath,
       statePath: paths.statePath,
       dataDir: paths.dataDir,
       resume: false,
       runner: {
         run: async (cmd: string, args: string[]) => {
           if (cmd === "lms" && args[0] === "ls") {
-            return { stdout: JSON.stringify(models.map((m) => m.modelKey)), stderr: "", exitCode: 0 };
+            return { stdout: JSON.stringify(discoveredModels), stderr: "", exitCode: 0 };
           }
           return { stdout: "", stderr: "", exitCode: 0 };
         },
@@ -44,19 +42,23 @@ function baseDeps(models: ModelConfig[]) {
   };
 }
 
-async function writeModelsConfig(path: string, models: ModelConfig[]) {
-  await Bun.write(path, JSON.stringify(models));
-}
-
 describe("runPipeline", () => {
-  test("runs every phase for a model that clears every gate", async () => {
+  test("discovers candidates from `lms ls --json --variants` and runs every phase for one that clears every gate", async () => {
     const models: ModelConfig[] = [{ modelKey: "model-a", quant: "Q4_K_M" }];
     const { paths, deps } = baseDeps(models);
-    await writeModelsConfig(paths.configPath, models);
 
     const calls: string[] = [];
+    const lsCalls: string[][] = [];
+    const runner: CommandRunner = {
+      run: async (cmd, args) => {
+        if (cmd === "lms" && args[0] === "ls") lsCalls.push(args);
+        return deps.runner.run(cmd, args);
+      },
+    };
+
     const result = await runPipeline({
       ...deps,
+      runner,
       now: () => "2026-08-10T00:00:00.000Z",
       phase1: async (m): Promise<Phase1Result> => {
         calls.push("phase1");
@@ -90,6 +92,7 @@ describe("runPipeline", () => {
       },
     });
 
+    expect(lsCalls[0]).toEqual(["ls", "--json", "--variants"]);
     expect(calls).toEqual(["phase1", "phase2", "phase3", "phase4"]);
     expect(result.state.completedPhases["model-a"]?.phase4Metrics?.passRatePercent).toBe(100);
     expect(result.reportMarkdown).toContain("model-a");
@@ -100,8 +103,7 @@ describe("runPipeline", () => {
 
   test("discards a model at phase 1 and skips later phases", async () => {
     const models: ModelConfig[] = [{ modelKey: "model-slow", quant: "Q4_K_M" }];
-    const { paths, deps } = baseDeps(models);
-    await writeModelsConfig(paths.configPath, models);
+    const { deps } = baseDeps(models);
 
     const calls: string[] = [];
     const result = await runPipeline({
@@ -130,8 +132,7 @@ describe("runPipeline", () => {
 
   test("discards a model at phase 2 and skips phase 3/4", async () => {
     const models: ModelConfig[] = [{ modelKey: "model-b", quant: "Q4_K_M" }];
-    const { paths, deps } = baseDeps(models);
-    await writeModelsConfig(paths.configPath, models);
+    const { deps } = baseDeps(models);
 
     const calls: string[] = [];
     const result = await runPipeline({
@@ -161,7 +162,6 @@ describe("runPipeline", () => {
   test("--resume skips phases already recorded in state", async () => {
     const models: ModelConfig[] = [{ modelKey: "model-a", quant: "Q4_K_M" }];
     const { paths, deps } = baseDeps(models);
-    await writeModelsConfig(paths.configPath, models);
 
     const priorState: PipelineState = {
       lastUpdated: "earlier",
@@ -214,7 +214,6 @@ describe("runPipeline", () => {
       { modelKey: "model-b", quant: "Q4_K_M" },
     ];
     const { paths, deps } = baseDeps(models);
-    await writeModelsConfig(paths.configPath, models);
 
     const calls: string[] = [];
     await expect(
@@ -251,10 +250,8 @@ describe("runPipeline", () => {
     expect(persisted?.completedPhases["model-b"]).toBeUndefined();
   });
 
-  test("halts before running when a configured model is missing from lms ls", async () => {
-    const models: ModelConfig[] = [{ modelKey: "not-installed", quant: "Q4_K_M" }];
-    const { paths, deps } = baseDeps([]);
-    await writeModelsConfig(paths.configPath, models);
+  test("halts before running anything when lms ls reports no downloaded models", async () => {
+    const { deps } = baseDeps([]);
 
     await expect(
       runPipeline({
@@ -263,6 +260,6 @@ describe("runPipeline", () => {
           throw new Error("should not run");
         },
       }),
-    ).rejects.toThrow(/not-installed/);
+    ).rejects.toThrow(/no downloaded models/i);
   });
 });

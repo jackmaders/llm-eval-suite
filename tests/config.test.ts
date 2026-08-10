@@ -1,79 +1,94 @@
 import { describe, expect, test } from "bun:test";
-import { parseLmsLsOutput, preflightCheck, validateModelsConfig } from "../src/config";
+import { discoverModels, extractQuant, parseLmsLsModels } from "../src/config";
 import type { CommandRunner } from "../src/subprocess";
-import type { ModelConfig } from "../src/types";
 
-describe("validateModelsConfig", () => {
-  test("accepts a well-formed array", () => {
-    const raw = [{ modelKey: "qwen2.5-coder-32b", quant: "Q4_K_M" }];
-    expect(validateModelsConfig(raw)).toEqual(raw as ModelConfig[]);
+describe("extractQuant", () => {
+  test("extracts common k-quant tokens from a model path", () => {
+    expect(extractQuant("TheBloke/Mistral-7B-Instruct-v0.2-GGUF/mistral-7b-instruct-v0.2.Q4_K_M.gguf")).toBe(
+      "Q4_K_M",
+    );
+    expect(extractQuant("some/path/model.Q8_0.gguf")).toBe("Q8_0");
+    expect(extractQuant("some/path/model.q5_k_s.gguf")).toBe("Q5_K_S");
   });
 
-  test("rejects non-array input", () => {
-    expect(() => validateModelsConfig({ modelKey: "x", quant: "y" })).toThrow();
+  test("extracts full-precision and legacy tokens", () => {
+    expect(extractQuant("model.F16.gguf")).toBe("F16");
+    expect(extractQuant("model.BF16.gguf")).toBe("BF16");
+    expect(extractQuant("model.IQ2_XXS.gguf")).toBe("IQ2_XXS");
   });
 
-  test("rejects entries missing modelKey or quant", () => {
-    expect(() => validateModelsConfig([{ modelKey: "x" }])).toThrow();
-    expect(() => validateModelsConfig([{ quant: "Q4_K_M" }])).toThrow();
-  });
-
-  test("rejects entries with non-string fields", () => {
-    expect(() => validateModelsConfig([{ modelKey: 1, quant: "Q4_K_M" }])).toThrow();
+  test("falls back to \"unknown\" when no quant token is present", () => {
+    expect(extractQuant("some/path/without-a-quant-token")).toBe("unknown");
   });
 });
 
-describe("parseLmsLsOutput", () => {
-  test("parses a JSON array of strings", () => {
-    const raw = JSON.stringify(["model-a", "model-b"]);
-    expect(parseLmsLsOutput(raw)).toEqual(["model-a", "model-b"]);
+describe("parseLmsLsModels", () => {
+  test("parses a JSON array of plain path strings, deriving quant from each path", () => {
+    const raw = JSON.stringify([
+      "publisher/model-a-GGUF/model-a.Q4_K_M.gguf",
+      "publisher/model-b-GGUF/model-b.Q8_0.gguf",
+    ]);
+    expect(parseLmsLsModels(raw)).toEqual([
+      { modelKey: "publisher/model-a-GGUF/model-a.Q4_K_M.gguf", quant: "Q4_K_M" },
+      { modelKey: "publisher/model-b-GGUF/model-b.Q8_0.gguf", quant: "Q8_0" },
+    ]);
   });
 
-  test("parses a JSON array of objects using path or modelKey", () => {
-    const raw = JSON.stringify([{ path: "model-a" }, { modelKey: "model-b" }]);
-    expect(parseLmsLsOutput(raw)).toEqual(["model-a", "model-b"]);
+  test("prefers an explicit quantization field over one inferred from the path", () => {
+    const raw = JSON.stringify([{ path: "publisher/model-a-GGUF/model-a.gguf", quantization: "Q4_K_M" }]);
+    expect(parseLmsLsModels(raw)).toEqual([{ modelKey: "publisher/model-a-GGUF/model-a.gguf", quant: "Q4_K_M" }]);
+  });
+
+  test("falls back to modelKey field when path is absent", () => {
+    const raw = JSON.stringify([{ modelKey: "model-a", quant: "Q5_K_M" }]);
+    expect(parseLmsLsModels(raw)).toEqual([{ modelKey: "model-a", quant: "Q5_K_M" }]);
   });
 
   test("falls back to line-based parsing for non-JSON output", () => {
-    const raw = "model-a\nmodel-b\n";
-    expect(parseLmsLsOutput(raw)).toEqual(["model-a", "model-b"]);
+    const raw = "model-a.Q4_K_M.gguf\nmodel-b.Q8_0.gguf\n";
+    expect(parseLmsLsModels(raw)).toEqual([
+      { modelKey: "model-a.Q4_K_M.gguf", quant: "Q4_K_M" },
+      { modelKey: "model-b.Q8_0.gguf", quant: "Q8_0" },
+    ]);
   });
 
   test("returns an empty list for blank output", () => {
-    expect(parseLmsLsOutput("   \n  ")).toEqual([]);
+    expect(parseLmsLsModels("   \n  ")).toEqual([]);
   });
 });
 
-describe("preflightCheck", () => {
-  const models: ModelConfig[] = [
-    { modelKey: "model-a", quant: "Q4_K_M" },
-    { modelKey: "model-b", quant: "Q5_K_M" },
-  ];
-
-  function fakeRunner(stdout: string): CommandRunner {
-    return {
-      run: async () => ({ stdout, stderr: "", exitCode: 0 }),
+describe("discoverModels", () => {
+  test("expands quantization variants via `lms ls --json --variants`", async () => {
+    const calls: Array<{ cmd: string; args: string[] }> = [];
+    const runner: CommandRunner = {
+      run: async (cmd, args) => {
+        calls.push({ cmd, args });
+        return {
+          stdout: JSON.stringify([
+            { path: "publisher/model-a-GGUF/model-a.Q4_K_M.gguf", quantization: "Q4_K_M" },
+            { path: "publisher/model-a-GGUF/model-a.Q8_0.gguf", quantization: "Q8_0" },
+          ]),
+          stderr: "",
+          exitCode: 0,
+        };
+      },
     };
-  }
 
-  test("reports ok:true when all configured models are locally available", async () => {
-    const runner = fakeRunner(JSON.stringify(["model-a", "model-b", "model-c"]));
-    const result = await preflightCheck(models, runner);
-    expect(result.ok).toBe(true);
-    expect(result.missing).toEqual([]);
-  });
-
-  test("reports missing models when lms ls does not list them", async () => {
-    const runner = fakeRunner(JSON.stringify(["model-a"]));
-    const result = await preflightCheck(models, runner);
-    expect(result.ok).toBe(false);
-    expect(result.missing).toEqual([{ modelKey: "model-b", quant: "Q5_K_M" }]);
+    const models = await discoverModels(runner);
+    expect(calls[0]).toEqual({ cmd: "lms", args: ["ls", "--json", "--variants"] });
+    expect(models).toHaveLength(2);
+    expect(models[0]).toEqual({ modelKey: "publisher/model-a-GGUF/model-a.Q4_K_M.gguf", quant: "Q4_K_M" });
   });
 
   test("propagates a non-zero exit code from lms ls as an error", async () => {
     const runner: CommandRunner = {
       run: async () => ({ stdout: "", stderr: "lms: command not found", exitCode: 127 }),
     };
-    await expect(preflightCheck(models, runner)).rejects.toThrow(/lms ls/);
+    await expect(discoverModels(runner)).rejects.toThrow(/lms ls/);
+  });
+
+  test("returns an empty list rather than throwing when nothing is downloaded", async () => {
+    const runner: CommandRunner = { run: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }) };
+    expect(await discoverModels(runner)).toEqual([]);
   });
 });

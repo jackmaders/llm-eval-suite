@@ -1,60 +1,46 @@
-// Configuration loading (models.json) and pre-flight validation against `lms ls`.
-// See spec: "1. Configuration & Pre-Flight Validation".
+// Live model discovery against LM Studio's local model store. Candidates are
+// no longer hand-typed in a static file — every downloaded GGUF quantization
+// variant `lms ls --json --variants` reports becomes a candidate automatically.
 
 import type { CommandRunner } from "./subprocess";
 import type { ModelConfig } from "./types";
 
-export class ConfigValidationError extends Error {}
+/**
+ * Matches common llama.cpp/GGUF quantization tokens (Q4_K_M, Q5_K_S, Q8_0,
+ * Q2_K, IQ2_XXS, F16, BF16, ...) embedded in a model path or key, so a quant
+ * can be inferred even when LM Studio doesn't report one as a separate field.
+ */
+const QUANT_PATTERN = /\b(IQ\d_[A-Z0-9]+|Q\d(?:_[A-Z0-9]+){1,2}|F(?:16|32)|BF16)\b/i;
 
-/** Validates that raw JSON parsed from models.json matches ModelConfig[]. */
-export function validateModelsConfig(raw: unknown): ModelConfig[] {
-  if (!Array.isArray(raw)) {
-    throw new ConfigValidationError("models.json must contain a JSON array of { modelKey, quant } entries");
-  }
-
-  return raw.map((entry, index) => {
-    if (typeof entry !== "object" || entry === null) {
-      throw new ConfigValidationError(`models.json[${index}] must be an object`);
-    }
-    const { modelKey, quant } = entry as Record<string, unknown>;
-    if (typeof modelKey !== "string" || modelKey.length === 0) {
-      throw new ConfigValidationError(`models.json[${index}].modelKey must be a non-empty string`);
-    }
-    if (typeof quant !== "string" || quant.length === 0) {
-      throw new ConfigValidationError(`models.json[${index}].quant must be a non-empty string`);
-    }
-    return { modelKey, quant };
-  });
-}
-
-/** Reads and validates a models.json file from disk. */
-export async function readModelsConfig(path: string): Promise<ModelConfig[]> {
-  const file = Bun.file(path);
-  if (!(await file.exists())) {
-    throw new ConfigValidationError(`Config file not found: ${path}`);
-  }
-  const raw = await file.json();
-  return validateModelsConfig(raw);
+/** Infers a GGUF quantization label from a model path/key. "unknown" if none is found. */
+export function extractQuant(identifier: string): string {
+  const match = identifier.match(QUANT_PATTERN);
+  return match ? match[1]!.toUpperCase() : "unknown";
 }
 
 /**
- * Parses the stdout of `lms ls` into a flat list of available model identifiers.
- * Tolerates LM Studio's `--json` output (array of strings, or array of objects
- * carrying a `path` or `modelKey` field) as well as plain line-based text output.
+ * Parses the stdout of `lms ls --json --variants` into ModelConfig[]. Tolerates
+ * a plain JSON array of path strings, an array of objects carrying `path` or
+ * `modelKey` (and optionally an explicit `quantization`/`quant` field), and
+ * falls back to line-based text parsing if the output isn't JSON at all.
  */
-export function parseLmsLsOutput(raw: string): string[] {
+export function parseLmsLsModels(raw: string): ModelConfig[] {
   const trimmed = raw.trim();
   if (trimmed.length === 0) return [];
 
   try {
     const parsed = JSON.parse(trimmed);
     if (Array.isArray(parsed)) {
-      return parsed.map((item) => {
-        if (typeof item === "string") return item;
+      return parsed.map((item): ModelConfig => {
+        if (typeof item === "string") {
+          return { modelKey: item, quant: extractQuant(item) };
+        }
         if (item && typeof item === "object") {
           const obj = item as Record<string, unknown>;
-          if (typeof obj.path === "string") return obj.path;
-          if (typeof obj.modelKey === "string") return obj.modelKey;
+          const modelKey = typeof obj.path === "string" ? obj.path : typeof obj.modelKey === "string" ? obj.modelKey : undefined;
+          if (!modelKey) throw new Error("unrecognized entry shape");
+          const explicitQuant = typeof obj.quantization === "string" ? obj.quantization : typeof obj.quant === "string" ? obj.quant : undefined;
+          return { modelKey, quant: explicitQuant ?? extractQuant(modelKey) };
         }
         throw new Error("unrecognized entry shape");
       });
@@ -66,29 +52,20 @@ export function parseLmsLsOutput(raw: string): string[] {
   return trimmed
     .split("\n")
     .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-}
-
-export interface PreflightResult {
-  ok: boolean;
-  available: string[];
-  missing: ModelConfig[];
+    .filter((line) => line.length > 0)
+    .map((line) => ({ modelKey: line, quant: extractQuant(line) }));
 }
 
 /**
- * Verifies that every configured model is present in LM Studio's local model
- * store by shelling out to `lms ls --json`. Throws if the `lms` CLI itself fails
- * (e.g. not installed), since that indicates the whole run cannot proceed.
+ * Discovers every locally-downloaded model+quantization variant by shelling
+ * out to `lms ls --json --variants` (the `--variants` flag is what expands
+ * each base model into its individually-downloaded quantizations). Throws if
+ * the `lms` CLI itself fails, since that means no run can proceed at all.
  */
-export async function preflightCheck(models: ModelConfig[], runner: CommandRunner): Promise<PreflightResult> {
-  const result = await runner.run("lms", ["ls", "--json"]);
+export async function discoverModels(runner: CommandRunner): Promise<ModelConfig[]> {
+  const result = await runner.run("lms", ["ls", "--json", "--variants"]);
   if (result.exitCode !== 0) {
     throw new Error(`\`lms ls\` failed with exit code ${result.exitCode}: ${result.stderr}`);
   }
-
-  const available = parseLmsLsOutput(result.stdout);
-  const availableSet = new Set(available);
-  const missing = models.filter((m) => !availableSet.has(m.modelKey));
-
-  return { ok: missing.length === 0, available, missing };
+  return parseLmsLsModels(result.stdout);
 }

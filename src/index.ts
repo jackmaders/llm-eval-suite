@@ -9,27 +9,24 @@ import { runPipeline } from "./orchestrator";
 import { BunCommandRunner } from "./subprocess";
 
 const DATA_DIR = join(import.meta.dir, "..", "data");
-const CONFIG_PATH = join(import.meta.dir, "..", "models.json");
 const STATE_PATH = join(DATA_DIR, ".pipeline_state.json");
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const resume = args.includes("--resume");
-  const bypassPreflight = args.includes("--bypass-preflight");
 
   const runner = new BunCommandRunner();
   const client = new LmStudioClient();
   const hardware = { getSnapshot: () => getHardwareSnapshot(runner) };
 
   console.log(`llm-eval-suite starting${resume ? " (resuming prior run)" : ""}...`);
+  console.log("Discovering candidate models via `lms ls --json --variants`...");
 
   try {
     const { reportPath, state } = await runPipeline({
-      configPath: CONFIG_PATH,
       statePath: STATE_PATH,
       dataDir: DATA_DIR,
       resume,
-      bypassPreflight,
       runner,
       client,
       hardware,

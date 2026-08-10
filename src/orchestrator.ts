@@ -1,10 +1,10 @@
-// Orchestrator: wires config validation, pre-flight checks, and the four
-// phases together against persisted state, honoring --resume. See spec
-// "Pipeline Stage Logic" end-to-end and user stories 12-14.
+// Orchestrator: wires live model discovery and the four phases together
+// against persisted state, honoring --resume. See spec "Pipeline Stage
+// Logic" end-to-end and user stories 12-14.
 
 import { join } from "node:path";
 import type { LmStudioClient } from "./apiClient";
-import { preflightCheck, readModelsConfig } from "./config";
+import { discoverModels } from "./config";
 import type { HardwareProvider } from "./phases/phase3";
 import { runPhase1 } from "./phases/phase1";
 import { runPhase2 } from "./phases/phase2";
@@ -23,14 +23,12 @@ import {
   withPhaseUpdate,
 } from "./state";
 import type { CommandRunner } from "./subprocess";
-import type { CompletedPhases, ModelConfig, PipelineState } from "./types";
+import type { CompletedPhases, PipelineState } from "./types";
 
 export interface OrchestratorDeps {
-  configPath: string;
   statePath: string;
   dataDir: string;
   resume: boolean;
-  bypassPreflight?: boolean;
   runner: CommandRunner;
   client: Pick<LmStudioClient, "completion" | "healthCheck">;
   hardware: HardwareProvider;
@@ -63,18 +61,17 @@ export async function runPipeline(deps: OrchestratorDeps): Promise<OrchestratorR
   const phase3Fn = deps.phase3 ?? runPhase3;
   const phase4Fn = deps.phase4 ?? runPhase4;
 
-  const models: ModelConfig[] = await readModelsConfig(deps.configPath);
-
   // User story 12: a dead/unbound LM Studio server must abort immediately,
   // before any model is loaded.
   await deps.client.healthCheck();
 
-  const preflight = await preflightCheck(models, deps.runner);
-  if (!preflight.ok && !deps.bypassPreflight) {
-    const missing = preflight.missing.map((m) => `${m.modelKey} (${m.quant})`).join(", ");
+  // Candidates are discovered live from LM Studio's local model store rather
+  // than typed into a static config file — every downloaded quantization
+  // variant `lms ls --json --variants` reports is evaluated.
+  const models = await discoverModels(deps.runner);
+  if (models.length === 0) {
     throw new Error(
-      `Pre-flight check failed: the following configured models are not present in \`lms ls\`: ${missing}. ` +
-        `Run with bypassPreflight to override.`,
+      "`lms ls` reports no downloaded models. Download at least one GGUF model in LM Studio before running the suite.",
     );
   }
 
