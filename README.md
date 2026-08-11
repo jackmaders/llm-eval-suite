@@ -45,6 +45,16 @@ moment a model is discarded.
    cap, and grades the resulting pass rate, syntax-error count, and
    pre/post-run decode-speed decay.
 
+Every load — Phase 1, Phase 2, and each rung of Phase 3's offload/context
+ladders — unloads whatever's currently loaded first. `lms load` on top of an
+already-loaded model can stack a second instance or leave requests resolving
+against a stale one instead of cleanly replacing it, which otherwise showed
+up as later phases silently running against the wrong model or quantization
+despite requesting the same modelKey. Phase 3 also reloads at
+`maxRecommendedContext` if its context ladder stopped early on a guardrail,
+so whatever's left loaded for Phase 4 always matches what the report says was
+recommended, not the over-limit rung that tripped the guardrail.
+
 Results are written incrementally to `data/.pipeline_state.json` (atomic
 write-then-rename, so a crash never leaves a truncated file), and a
 `data/report_<timestamp>.md` comparison report is generated at the end of the

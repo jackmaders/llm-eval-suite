@@ -43,7 +43,7 @@ describe("resolveGpuOffload", () => {
     const hardware = { getSnapshot: async () => healthySnapshot() };
     const result = await resolveGpuOffload(runner, hardware, model.modelKey, 8192);
     expect(result.offload).toBe(1);
-    expect(calls[0]).toContain("1");
+    expect(calls[1]).toContain("1"); // calls[0] is the pre-load `lms unload --all`
   });
 
   test("steps down offload when shared GPU memory exceeds 300MB", async () => {
@@ -147,6 +147,43 @@ describe("runContextLadder", () => {
     const result = await runContextLadder(runner, client, hardware, model.modelKey, 1);
     expect(result.maxRecommendedContext).toBe(CONTEXT_LADDER[1]);
     expect(result.ladderHistory[2]?.speedDropPercent).toBeGreaterThanOrEqual(15);
+  });
+
+  test("reloads at maxRecommendedContext when scaling stops early, instead of leaving the failing rung loaded", async () => {
+    // Regression: the loop's final loadModel() call is for whichever rung
+    // *tripped* the guardrail, not the last one that passed — so without a
+    // trailing reload, the model would be left loaded at an over-limit
+    // configuration even though the profile reports a smaller "recommended"
+    // context (and Phase 4 would then run against that broken load).
+    const { runner, calls } = recordingRunner();
+    const client: Pick<LmStudioClient, "completion"> = { completion: completionAt(20) };
+    let step = 0;
+    const hardware = {
+      getSnapshot: async () => {
+        step++;
+        return healthySnapshot({ ramUsedPercent: step === 2 ? 92 : 40 });
+      },
+    };
+
+    const result = await runContextLadder(runner, client, hardware, model.modelKey, 1);
+    expect(result.maxRecommendedContext).toBe(CONTEXT_LADDER[0]);
+
+    const loadCalls = calls.filter((args) => args[0] === "load");
+    const lastLoadCall = loadCalls[loadCalls.length - 1];
+    expect(lastLoadCall?.[1]).toBe(model.modelKey);
+    expect(lastLoadCall).toContain(String(CONTEXT_LADDER[0]));
+  });
+
+  test("does not reload when the ladder climbed cleanly to the top (already loaded there)", async () => {
+    const { runner, calls } = recordingRunner();
+    const client: Pick<LmStudioClient, "completion"> = { completion: completionAt(20) };
+    const hardware = { getSnapshot: async () => healthySnapshot() };
+
+    await runContextLadder(runner, client, hardware, model.modelKey, 1);
+
+    const loadCalls = calls.filter((args) => args[0] === "load");
+    // One load call per ladder rung, no extra trailing reload.
+    expect(loadCalls).toHaveLength(CONTEXT_LADDER.length);
   });
 });
 

@@ -104,6 +104,16 @@ export async function runContextLadder(
     maxRecommendedContext = contextLength;
   }
 
+  // If scaling stopped because a rung tripped a guardrail, the model is
+  // currently still loaded at that over-limit configuration — the loop's
+  // last loadModel() call was for the failing rung, not the recommended one.
+  // Reload at maxRecommendedContext so whatever's left loaded actually
+  // matches what this profile reports (Phase 4 runs against it next).
+  const lastAttempted = ladderHistory[ladderHistory.length - 1]?.contextLength;
+  if (maxRecommendedContext > 0 && lastAttempted !== maxRecommendedContext) {
+    await loadModel(runner, modelKey, { contextLength: maxRecommendedContext, gpuOffloadLayers: gpuOffload, kvCacheQuant: "Q8_0" });
+  }
+
   return { maxRecommendedContext, ladderHistory };
 }
 
