@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { readdir, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { hasRepetitionLoop, PHASE2_CONTEXT_LENGTH, runPhase2, validatePhase2Output } from "../src/phases/phase2";
 import type { LmStudioClient } from "../src/apiClient";
 import type { CommandRunner } from "../src/subprocess";
@@ -43,6 +46,27 @@ describe("validatePhase2Output", () => {
     expect(result.passed).toBe(false);
     expect(result.reason).toMatch(/repetition/i);
   });
+
+  test("regression: picks the final JSON object over an earlier brace-laden reasoning preamble", () => {
+    // Reasoning-tuned models commonly think out loud before answering, and
+    // that reasoning can itself contain example/draft JSON with braces. The
+    // naive "first { to last }" extraction used to span from the reasoning's
+    // opening brace all the way to the real answer's closing brace, producing
+    // an unparsable concatenation and a false "invalid JSON" failure even
+    // though a good answer was present.
+    const output = `Let me think about this. A draft might look like {"example": "not this one"} but let me format it correctly.
+
+${JSON.stringify(validToolCall)}`;
+    const result = validatePhase2Output(output);
+    expect(result.passed).toBe(true);
+    expect(result.parsedJson).toEqual(validToolCall);
+  });
+
+  test("still fails on genuinely truncated/incomplete JSON", () => {
+    const truncated = JSON.stringify(validToolCall).slice(0, -10);
+    const result = validatePhase2Output(truncated);
+    expect(result.passed).toBe(false);
+  });
 });
 
 describe("hasRepetitionLoop", () => {
@@ -74,6 +98,16 @@ function fakeClient(text: string): LmStudioClient {
 }
 
 describe("runPhase2", () => {
+  const failureLogDirs: string[] = [];
+  afterEach(async () => {
+    await Promise.all(failureLogDirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
+  });
+  function makeFailureLogDir(): string {
+    const dir = join(tmpdir(), `llm-eval-suite-phase2-failures-${crypto.randomUUID()}`);
+    failureLogDirs.push(dir);
+    return dir;
+  }
+
   test("loads at 8192 context and passes a valid response", async () => {
     const runner = fakeRunner();
     const spy: string[] = [];
@@ -95,5 +129,27 @@ describe("runPhase2", () => {
     const client = fakeClient("garbage output {{{");
     const result = await runPhase2(model, { runner: fakeRunner(), client });
     expect(result.passed).toBe(false);
+  });
+
+  test("saves the raw response to a failure log file when validation fails", async () => {
+    const failureLogDir = makeFailureLogDir();
+    const client = fakeClient("garbage output {{{");
+    const result = await runPhase2(model, { runner: fakeRunner(), client, failureLogDir });
+
+    expect(result.passed).toBe(false);
+    const files = await readdir(failureLogDir);
+    expect(files).toHaveLength(1);
+    const content = await readFile(join(failureLogDir, files[0]!), "utf-8");
+    expect(content).toContain("model-a");
+    expect(content).toContain("garbage output {{{");
+    expect(content).toContain(result.reason ?? "");
+  });
+
+  test("does not write a failure log on success", async () => {
+    const failureLogDir = makeFailureLogDir();
+    const client = fakeClient(JSON.stringify(validToolCall));
+    await runPhase2(model, { runner: fakeRunner(), client, failureLogDir });
+
+    await expect(readdir(failureLogDir)).rejects.toThrow();
   });
 });

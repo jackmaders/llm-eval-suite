@@ -33,9 +33,20 @@ moment a model is discarded.
    requires ≥ 10 tok/sec on a short completion, or it's discarded.
 2. **Phase 2 — Capability & Sanity Filter**: loads at 8192 context and
    requires a well-formed, non-repeating JSON tool-call response to an
-   AST-parsing prompt.
+   AST-parsing prompt. Uses a 1024-token budget rather than a hard 300 —
+   reasoning-tuned models (Magistral, Qwen3-thinking variants, ...) commonly
+   emit a chain-of-thought preamble before their real answer, and 300 tokens
+   was frequently consumed entirely by that preamble before ever reaching the
+   JSON. JSON extraction also picks the *last* balanced `{...}` object in the
+   response rather than naively spanning from the first `{` to the last `}`,
+   since draft/example JSON inside the reasoning preamble would otherwise get
+   concatenated with the real answer into something unparsable. When a model
+   still fails, its full prompt + raw response is saved to
+   `data/phase2-failures/<modelKey>.txt` for offline diagnosis.
 3. **Phase 3 — Stage-Gate Hyperparameter & Context Tuner**: enforces `Q8_0` KV
-   cache quantization, steps GPU offload down until Shared GPU Memory ≤ 300MB
+   cache quantization (best-effort — an `lms` version that rejects
+   `--kv-cache-quant` as unknown just skips it with a warning, rather than
+   aborting the run), steps GPU offload down until Shared GPU Memory ≤ 300MB
    and free VRAM ≥ 1500MB, then climbs a context ladder
    (8k → 16k → 24k → 32k → 48k → 64k) until system RAM ≥ 90%, shared GPU
    memory ≥ 300MB, or decode speed regresses ≥ 15% vs. the 8k baseline.

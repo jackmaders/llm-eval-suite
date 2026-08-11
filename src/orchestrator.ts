@@ -170,8 +170,15 @@ export async function runPipeline(deps: OrchestratorDeps): Promise<OrchestratorR
     // Phase 2: Capability & Sanity Filter
     if (phases.has(2)) {
       if (!(deps.resume && hasCompletedPhase2(state, model.modelKey))) {
-        const result = await phase2Fn(model, { runner: deps.runner, client: deps.client });
+        const result = await phase2Fn(model, {
+          runner: deps.runner,
+          client: deps.client,
+          failureLogDir: join(deps.dataDir, "phase2-failures"),
+        });
         logPhase(model.modelKey, "Phase 2", result.passed ? "PASS" : `FAIL — ${result.reason ?? "unknown reason"}`);
+        if (!result.passed) {
+          console.log(`${model.modelKey} — raw Phase 2 response saved to ${join(deps.dataDir, "phase2-failures")}`);
+        }
         state = withPhaseUpdate(
           state,
           model.modelKey,
