@@ -74,7 +74,21 @@ moment a model is discarded.
    workspace with a 15-problem polyglot (TypeScript/JavaScript/Python/Go/Rust)
    refactoring slice, runs `aider` headlessly against it under a 15-minute
    cap, and grades the resulting pass rate, syntax-error count, and
-   pre/post-run decode-speed decay.
+   pre/post-run decode-speed decay. Every subprocess this suite spawns
+   (`lms`, `powershell.exe`, `aider`, `git`) has its stdin explicitly closed
+   rather than left to inherit the parent terminal's — without that, a
+   process that unexpectedly hits a confirmation prompt sees a live,
+   interactive TTY and blocks forever waiting for a keypress that never
+   comes, instead of failing fast (reported: aider appeared to hang, and had
+   opened `aider.chat/docs/llms/warnings.html` and
+   `HISTORY.html#release-notes` in a browser — its own model-warnings and
+   update-notification checks, neither suppressed by `--yes-always` alone).
+   `buildAiderArgs` also passes `--no-check-update --no-show-release-notes
+   --no-show-model-warnings --disable-playwright --no-analytics --no-gui` to
+   stop those checks from running at all. Console logs show exactly when
+   aider starts, the full command (with the long `--message` body summarized
+   to its length), and how long it ran before finishing or hitting the
+   timeout.
 
 Every load — Phase 1, Phase 2, and each rung of Phase 3's offload/context
 ladders — unloads whatever's currently loaded first. `lms load` on top of an

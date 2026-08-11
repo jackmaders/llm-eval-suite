@@ -19,6 +19,14 @@ export class BunCommandRunner implements CommandRunner {
       cwd: opts?.cwd,
       stdout: "pipe",
       stderr: "pipe",
+      // Every process this suite spawns (lms, powershell.exe, aider, git) is
+      // meant to run fully unattended. Without this, stdin defaults to
+      // inheriting our own terminal's — meaning a spawned process that
+      // unexpectedly waits on a confirmation prompt sees a live, interactive
+      // TTY and genuinely blocks forever waiting for a keypress that will
+      // never come, instead of failing fast. Reported: aider appeared to
+      // hang during Phase 4 with no way to tell why.
+      stdin: "ignore",
     });
 
     const timeoutMs = opts?.timeoutMs;

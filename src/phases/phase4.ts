@@ -371,6 +371,12 @@ export async function prepareWorkspace(
  * OpenAI-compatible server, including LM Studio's. --openai-api-key is
  * required even though LM Studio doesn't check it — aider's HTTP client
  * fails outright trying to send an empty Bearer token without one.
+ *
+ * The --no-... and --disable-... flags below suppress aider's own interactive
+ * and side-effecting behaviors for a fully unattended run: reported symptom was
+ * aider opening aider.chat/docs/llms/warnings.html and HISTORY.html#release-notes
+ * in a browser during Phase 4 and appearing to hang — its model-warnings and
+ * update-notification checks, which --yes-always alone doesn't suppress.
  */
 export function buildAiderArgs(problems: PolyglotProblem[], baseUrl: string, modelKey: string): string[] {
   const message = [
@@ -381,6 +387,12 @@ export function buildAiderArgs(problems: PolyglotProblem[], baseUrl: string, mod
   return [
     "--yes-always",
     "--no-auto-commits",
+    "--no-gui",
+    "--no-check-update",
+    "--no-show-release-notes",
+    "--no-show-model-warnings",
+    "--disable-playwright",
+    "--no-analytics",
     "--openai-api-base",
     baseUrl,
     "--openai-api-key",
@@ -428,20 +440,34 @@ export async function runPhase4(
   const workspaceDir = join(deps.workspaceRoot ?? "./data", `workspace_${sanitizeWorkspaceName(model.modelKey)}`);
   const baseUrl = deps.baseUrl ?? "http://127.0.0.1:1234/v1";
 
+  console.log(`${model.modelKey} — Phase 4: seeding isolated workspace at ${workspaceDir} (${problems.length} problems)...`);
   await prepareWorkspace(deps.runner, workspaceDir, problems);
 
   const preRunDecodeSpeed = await measureDecodeSpeed(deps.client, model.modelKey);
 
   const aiderArgs = buildAiderArgs(problems, baseUrl, model.modelKey);
+  // The --message body is long (one line per problem) — log every other arg
+  // in full but summarize it, so the actual flags used are visible without
+  // drowning them in prompt text.
+  const loggedArgs = aiderArgs.map((arg, i) => (aiderArgs[i - 1] === "--message" ? `<message: ${arg.length} chars>` : arg));
+  console.log(
+    `${model.modelKey} — Phase 4: running aider ${loggedArgs.join(" ")} (cwd=${workspaceDir}, timeout=${Math.round(AIDER_TIMEOUT_MS / 60000)}min)`,
+  );
+  const aiderStartedAt = Date.now();
   try {
     await deps.runner.run("aider", aiderArgs, { cwd: workspaceDir, timeoutMs: AIDER_TIMEOUT_MS });
+    console.log(`${model.modelKey} — Phase 4: aider finished in ${((Date.now() - aiderStartedAt) / 1000).toFixed(1)}s`);
   } catch (err) {
     // A run that hits the 15-minute cap is expected for slower models — grade
     // whatever aider managed to edit rather than failing the whole phase.
     if (!(err instanceof Error) || !/timed out/i.test(err.message)) throw err;
+    console.log(
+      `${model.modelKey} — Phase 4: aider hit the ${Math.round(AIDER_TIMEOUT_MS / 60000)}-minute timeout — grading whatever it managed to edit`,
+    );
   }
 
   const postRunDecodeSpeed = await measureDecodeSpeed(deps.client, model.modelKey);
+  console.log(`${model.modelKey} — Phase 4: grading ${problems.length} problem(s)...`);
   const { passed, syntaxErrorCount } = await runProblemTests(deps.runner, workspaceDir, problems);
 
   const thermalDecayPercent =
