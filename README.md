@@ -55,6 +55,13 @@ larger/less compressed quant could improve quality for free) — see
 `src/recommendation.ts`. These are suggestions only; the suite never applies
 them or picks a "winner" itself.
 
+The report's Phase 1 and Phase 2 columns always show the measured tok/sec (or
+failure reason) alongside pass/fail — for every model, not just discarded
+ones — and the same numbers are logged live to the console as each phase
+runs, so a run where every model gets discarded is diagnosable without
+digging through state files: a `0.00 tok/sec` reading across the board means
+the measurement pipeline is broken, not that every model is genuinely slow.
+
 ## Prerequisites
 
 - [Bun](https://bun.sh) 1.3+
@@ -76,9 +83,18 @@ bun install
 # evaluated for each model first — there's no separate allow-list to
 # maintain, but only the currently-selected variant per model is evaluated
 
-bun run src/index.ts            # fresh run
+bun run src/index.ts            # fresh run, all four phases
 bun run src/index.ts --resume   # resume from data/.pipeline_state.json
+bun run src/index.ts --phases=1,2         # only run the fast filters
+bun run src/index.ts --phases=3 --resume  # re-tune Phase 3 for models that already have phase1/2 recorded
 ```
+
+`--phases` restricts which phases run this invocation (default: all four,
+`1,2,3,4`). A phase not in the list is skipped entirely — not run, and not
+treated as a failure — so `--phases=3` runs Phase 3 on every discovered model
+regardless of whether Phase 1/2 have ever been recorded for it. Combine with
+`--resume` to keep it from redoing whichever phases you did request but
+already have results for.
 
 ## Development
 

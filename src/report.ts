@@ -6,7 +6,6 @@ import { recommendQuantChange } from "./recommendation";
 import type { CompletedPhases, PipelineState } from "./types";
 
 const PLACEHOLDER = "—";
-const TABLE_COLUMN_COUNT = 9;
 
 export function buildMarkdownTable(headers: string[], rows: string[][]): string {
   const headerLine = `| ${headers.join(" | ")} |`;
@@ -28,21 +27,32 @@ function quantNoteLabel(profile: CompletedPhases["phase3Profile"]): string {
   return rec.suggestedQuant ? `${arrow} try ${rec.suggestedQuant}` : `${arrow} ${rec.direction}`;
 }
 
-function renderRow(modelKey: string, phases: CompletedPhases): string[] {
-  if (phases.discardedAt) {
-    const stage = phases.discardedAt === "DISCARDED_PHASE1" ? "Phase 1" : "Phase 2";
-    return [modelKey, `Discarded (${stage})`, ...Array(TABLE_COLUMN_COUNT - 2).fill(PLACEHOLDER)];
-  }
+/**
+ * Always surfaces the measured tok/sec alongside pass/fail, not just on
+ * failure — the whole point is to make it possible to tell "actually slow"
+ * apart from "the measurement pipeline is broken" at a glance, without
+ * digging through logs.
+ */
+function phase1Cell(phases: CompletedPhases): string {
+  if (phases.phase1Passed === undefined) return PLACEHOLDER;
+  const speed = phases.phase1TokPerSec !== undefined ? `${round1(phases.phase1TokPerSec)} tok/s` : PLACEHOLDER;
+  return `${phases.phase1Passed ? "Pass" : "Fail"} (${speed})`;
+}
 
-  const phase1 = phases.phase1Passed === undefined ? PLACEHOLDER : phases.phase1Passed ? "Pass" : "Fail";
-  const phase2 = phases.phase2Passed === undefined ? PLACEHOLDER : phases.phase2Passed ? "Pass" : "Fail";
+function phase2Cell(phases: CompletedPhases): string {
+  if (phases.phase2Passed === undefined) return PLACEHOLDER;
+  if (phases.phase2Passed) return "Pass";
+  return phases.phase2Reason ? `Fail (${phases.phase2Reason})` : "Fail";
+}
+
+function renderRow(modelKey: string, phases: CompletedPhases): string[] {
   const profile = phases.phase3Profile;
   const metrics = phases.phase4Metrics;
 
   return [
     modelKey,
-    phase1,
-    phase2,
+    phase1Cell(phases),
+    phase2Cell(phases),
     profile ? String(profile.maxRecommendedContext) : PLACEHOLDER,
     profile ? profile.verifiedGpuOffload : PLACEHOLDER,
     profile ? profile.kvCacheQuant : PLACEHOLDER,

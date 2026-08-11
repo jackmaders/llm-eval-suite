@@ -42,7 +42,11 @@ export interface BenchmarkMetrics {
 
 export interface CompletedPhases {
   phase1Passed?: boolean;
+  /** Measured decode tok/sec from the Phase 1 ping, kept regardless of pass/fail for diagnostics. */
+  phase1TokPerSec?: number;
   phase2Passed?: boolean;
+  /** Why Phase 2 failed (invalid JSON, schema mismatch, repetition loop, ...), when it did. */
+  phase2Reason?: string;
   phase3Profile?: Phase3TuningProfile;
   phase4Metrics?: BenchmarkMetrics;
   discardedAt?: "DISCARDED_PHASE1" | "DISCARDED_PHASE2";

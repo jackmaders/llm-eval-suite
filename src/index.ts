@@ -5,7 +5,7 @@
 import { join } from "node:path";
 import { LmStudioClient, ServerCrashError } from "./apiClient";
 import { getHardwareSnapshot } from "./hardware";
-import { runPipeline } from "./orchestrator";
+import { parsePhasesFlag, runPipeline } from "./orchestrator";
 import { BunCommandRunner } from "./subprocess";
 
 const DATA_DIR = join(import.meta.dir, "..", "data");
@@ -19,14 +19,17 @@ async function main(): Promise<void> {
   const client = new LmStudioClient();
   const hardware = { getSnapshot: () => getHardwareSnapshot(runner) };
 
-  console.log(`llm-eval-suite starting${resume ? " (resuming prior run)" : ""}...`);
-  console.log("Discovering candidate models via `lms ls --json --variants`...");
-
   try {
+    const phases = parsePhasesFlag(args);
+    console.log(`llm-eval-suite starting${resume ? " (resuming prior run)" : ""}...`);
+    console.log(`Running phase(s): ${[...phases].sort().join(", ")}`);
+    console.log("Discovering candidate models via `lms ls --json --variants`...");
+
     const { reportPath, state } = await runPipeline({
       statePath: STATE_PATH,
       dataDir: DATA_DIR,
       resume,
+      phases,
       runner,
       client,
       hardware,

@@ -38,6 +38,7 @@ describe("generateMarkdownReport", () => {
       },
       "model-b": {
         phase1Passed: false,
+        phase1TokPerSec: 3.2,
         discardedAt: "DISCARDED_PHASE1",
       },
     },
@@ -58,10 +59,34 @@ describe("generateMarkdownReport", () => {
     expect(report).toContain("3.2");
   });
 
-  test("marks a Phase 1 discard clearly instead of blank cells", () => {
+  test("shows the measured Phase 1 speed for a discarded model instead of a bare fail flag", () => {
     const report = generateMarkdownReport(state);
     expect(report).toContain("model-b");
-    expect(report).toMatch(/DISCARDED_PHASE1|Discarded.*Phase 1/i);
+    expect(report).toContain("Fail (3.2 tok/s)");
+  });
+
+  test("shows the measured Phase 1 speed for a model that passed, not just for failures", () => {
+    const report = generateMarkdownReport({
+      lastUpdated: "now",
+      completedPhases: { "model-fast": { phase1Passed: true, phase1TokPerSec: 42.1 } },
+    });
+    expect(report).toContain("Pass (42.1 tok/s)");
+  });
+
+  test("shows the Phase 2 failure reason inline when one is recorded", () => {
+    const report = generateMarkdownReport({
+      lastUpdated: "now",
+      completedPhases: {
+        "model-c": {
+          phase1Passed: true,
+          phase1TokPerSec: 20,
+          phase2Passed: false,
+          phase2Reason: "output did not contain valid JSON",
+          discardedAt: "DISCARDED_PHASE2",
+        },
+      },
+    });
+    expect(report).toContain("Fail (output did not contain valid JSON)");
   });
 
   test("uses a placeholder for phases that have not run yet", () => {

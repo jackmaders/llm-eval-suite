@@ -3,7 +3,7 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ServerCrashError } from "../src/apiClient";
-import { runPipeline } from "../src/orchestrator";
+import { parsePhasesFlag, runPipeline } from "../src/orchestrator";
 import { loadState, saveStateAtomic } from "../src/state";
 import type { CommandRunner } from "../src/subprocess";
 import type { ModelConfig, Phase1Result, Phase2Result, PipelineState } from "../src/types";
@@ -41,6 +41,28 @@ function baseDeps(discoveredModels: ModelConfig[]) {
     },
   };
 }
+
+describe("parsePhasesFlag", () => {
+  test("defaults to all four phases when the flag is absent", () => {
+    expect(parsePhasesFlag(["--resume"])).toEqual(new Set([1, 2, 3, 4]));
+  });
+
+  test("parses a comma-separated subset", () => {
+    expect(parsePhasesFlag(["--phases=1,2"])).toEqual(new Set([1, 2]));
+  });
+
+  test("tolerates whitespace around values", () => {
+    expect(parsePhasesFlag(["--phases= 3 , 4 "])).toEqual(new Set([3, 4]));
+  });
+
+  test("throws on an out-of-range phase number", () => {
+    expect(() => parsePhasesFlag(["--phases=1,5"])).toThrow(/1, 2, 3, 4/);
+  });
+
+  test("throws on an empty phase list", () => {
+    expect(() => parsePhasesFlag(["--phases="])).toThrow(/at least one phase/i);
+  });
+});
 
 describe("runPipeline", () => {
   test("discovers candidates from `lms ls --json --variants` and runs every phase for one that clears every gate", async () => {
@@ -248,6 +270,76 @@ describe("runPipeline", () => {
     const persisted = await loadState(paths.statePath);
     expect(persisted?.completedPhases["model-a"]?.phase4Metrics).toBeDefined();
     expect(persisted?.completedPhases["model-b"]).toBeUndefined();
+  });
+
+  test("--phases restricts which phases run and skips the discard gate for phases not requested", async () => {
+    const models: ModelConfig[] = [{ modelKey: "model-a", quant: "Q4_K_M" }];
+    const { deps } = baseDeps(models);
+
+    const calls: string[] = [];
+    const result = await runPipeline({
+      ...deps,
+      phases: new Set([3]),
+      phase1: async () => {
+        calls.push("phase1");
+        throw new Error("should not run — phase 1 wasn't requested");
+      },
+      phase2: async () => {
+        calls.push("phase2");
+        throw new Error("should not run — phase 2 wasn't requested");
+      },
+      phase3: async (m) => {
+        calls.push("phase3");
+        return {
+          modelKey: m.modelKey,
+          quant: m.quant,
+          verifiedGpuOffload: "max",
+          kvCacheQuant: "Q8_0" as const,
+          maxRecommendedContext: 16384,
+          ladderHistory: [],
+        };
+      },
+      phase4: async () => {
+        calls.push("phase4");
+        throw new Error("should not run — phase 4 wasn't requested");
+      },
+    });
+
+    expect(calls).toEqual(["phase3"]);
+    expect(result.state.completedPhases["model-a"]?.discardedAt).toBeUndefined();
+    expect(result.state.completedPhases["model-a"]?.phase3Profile?.maxRecommendedContext).toBe(16384);
+    expect(result.state.completedPhases["model-a"]?.phase1Passed).toBeUndefined();
+  });
+
+  test("--phases=1,2 runs only the fast filters and stops there, even for a model that would pass", async () => {
+    const models: ModelConfig[] = [{ modelKey: "model-a", quant: "Q4_K_M" }];
+    const { deps } = baseDeps(models);
+
+    const calls: string[] = [];
+    const result = await runPipeline({
+      ...deps,
+      phases: new Set([1, 2]),
+      phase1: async (m) => {
+        calls.push("phase1");
+        return { modelKey: m.modelKey, tokPerSec: 20, passed: true };
+      },
+      phase2: async (m) => {
+        calls.push("phase2");
+        return { modelKey: m.modelKey, passed: true };
+      },
+      phase3: async () => {
+        calls.push("phase3");
+        throw new Error("should not run — phase 3 wasn't requested");
+      },
+      phase4: async () => {
+        calls.push("phase4");
+        throw new Error("should not run — phase 4 wasn't requested");
+      },
+    });
+
+    expect(calls).toEqual(["phase1", "phase2"]);
+    expect(result.state.completedPhases["model-a"]?.phase1TokPerSec).toBe(20);
+    expect(result.state.completedPhases["model-a"]?.phase3Profile).toBeUndefined();
   });
 
   test("halts before running anything when lms ls reports no downloaded models", async () => {
