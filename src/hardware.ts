@@ -29,8 +29,28 @@ $shared = (Get-Counter '\\GPU Adapter Memory(*)\\Shared Usage').CounterSamples |
 $dedicatedUsedMB = [math]::Round($dedicated.Sum / 1MB, 2)
 $sharedGpuMemoryMB = [math]::Round($shared.Sum / 1MB, 2)
 
-# Dedicated VRAM total is read from the adapter's AdapterRAM (bytes) via CIM.
-$vramTotalMB = (Get-CimInstance Win32_VideoController | Measure-Object -Property AdapterRAM -Sum).Sum / 1MB
+# Win32_VideoController.AdapterRAM is a 32-bit WMI field that caps/wraps at
+# 4GB for any GPU with more VRAM than that (a well-documented Windows
+# limitation) — silently reporting ~4095MB "total" on a 16GB card and making
+# dedicatedVramFreeMB go deeply negative even when the GPU has plenty of
+# headroom. Read the true size from the registry instead (the standard
+# workaround: HardwareInformation.qwMemorySize under each display adapter's
+# driver key), taking the largest value found across adapters since an
+# integrated/basic-display-driver entry would report far less than a
+# discrete GPU. Falls back to AdapterRAM only if the registry read yields
+# nothing (e.g. a non-standard driver).
+$vramTotalMB = 0
+Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue |
+  ForEach-Object {
+    $qwMemorySize = (Get-ItemProperty -Path $_.PSPath -Name 'HardwareInformation.qwMemorySize' -ErrorAction SilentlyContinue).'HardwareInformation.qwMemorySize'
+    if ($qwMemorySize -and $qwMemorySize -gt 0) {
+      $candidateMB = [math]::Round($qwMemorySize / 1MB, 2)
+      if ($candidateMB -gt $vramTotalMB) { $vramTotalMB = $candidateMB }
+    }
+  }
+if ($vramTotalMB -eq 0) {
+  $vramTotalMB = [math]::Round((Get-CimInstance Win32_VideoController | Measure-Object -Property AdapterRAM -Sum).Sum / 1MB, 2)
+}
 $dedicatedVramFreeMB = [math]::Round($vramTotalMB - $dedicatedUsedMB, 2)
 
 $result = @{
