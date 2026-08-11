@@ -185,6 +185,24 @@ describe("runContextLadder", () => {
     // One load call per ladder rung, no extra trailing reload.
     expect(loadCalls).toHaveLength(CONTEXT_LADDER.length);
   });
+
+  test("skips reloading the first rung when it's already loaded (resolveGpuOffload just left it there)", async () => {
+    // Regression: resolveGpuOffload() leaves the model loaded at
+    // CONTEXT_LADDER[0] with the winning offload right before this runs —
+    // reloading that identical config again is a pure-waste extra
+    // unload/load cycle, and one contributing factor in a reported native
+    // llama.cpp crash after several rapid such cycles.
+    const { runner, calls } = recordingRunner();
+    const client: Pick<LmStudioClient, "completion"> = { completion: completionAt(20) };
+    const hardware = { getSnapshot: async () => healthySnapshot() };
+
+    await runContextLadder(runner, client, hardware, model.modelKey, 1, CONTEXT_LADDER[0]);
+
+    const loadCalls = calls.filter((args) => args[0] === "load");
+    // One fewer load than rungs — the first rung's load was skipped.
+    expect(loadCalls).toHaveLength(CONTEXT_LADDER.length - 1);
+    expect(loadCalls.some((args) => args.includes(String(CONTEXT_LADDER[0])))).toBe(false);
+  });
 });
 
 describe("runPhase3", () => {

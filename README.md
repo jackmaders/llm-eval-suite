@@ -64,7 +64,15 @@ up as later phases silently running against the wrong model or quantization
 despite requesting the same modelKey. Phase 3 also reloads at
 `maxRecommendedContext` if its context ladder stopped early on a guardrail,
 so whatever's left loaded for Phase 4 always matches what the report says was
-recommended, not the over-limit rung that tripped the guardrail.
+recommended, not the over-limit rung that tripped the guardrail — and skips
+one redundant load entirely where it can: `resolveGpuOffload` already leaves
+the model loaded at the winning offload for the ladder's first rung, so that
+rung doesn't immediately reload the identical config again. Load/unload
+cycling isn't free — LM Studio's `llama-server` backend has a known native
+memory-mapping crash
+([ggml-org/llama.cpp#18090](https://github.com/ggml-org/llama.cpp/issues/18090))
+that a Windows run of this suite hit after several rapid cycles in under a
+minute, so every avoidable cycle is worth cutting.
 
 If a phase throws instead of returning a normal pass/fail — most commonly LM
 Studio's `llama-server` engine crashing outright while loading or running one

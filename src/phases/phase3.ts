@@ -64,6 +64,13 @@ export async function resolveGpuOffload(
  * halts the first time system RAM, shared GPU memory, or decode speed (relative
  * to the 8k baseline) breaches its guardrail; the failing step is still recorded
  * for the report, but maxRecommendedContext stops at the last successful rung.
+ *
+ * `alreadyLoadedAtContext`, when it matches the first rung, skips that rung's
+ * loadModel() call — resolveGpuOffload() already left the model loaded at
+ * exactly that context+offload right before this runs, so reloading it again
+ * immediately would be a pure-waste extra unload/load cycle (and, per a
+ * reported native llama.cpp crash after several such cycles in quick
+ * succession, one worth not adding unnecessarily).
  */
 export async function runContextLadder(
   runner: CommandRunner,
@@ -71,13 +78,16 @@ export async function runContextLadder(
   hardware: HardwareProvider,
   modelKey: string,
   gpuOffload: number,
+  alreadyLoadedAtContext?: number,
 ): Promise<{ maxRecommendedContext: number; ladderHistory: ContextLadderStep[] }> {
   const ladderHistory: ContextLadderStep[] = [];
   let maxRecommendedContext = 0;
   let baselineDecodeTokPerSec: number | undefined;
 
   for (const contextLength of CONTEXT_LADDER) {
-    await loadModel(runner, modelKey, { contextLength, gpuOffloadLayers: gpuOffload, kvCacheQuant: "Q8_0" });
+    if (contextLength !== alreadyLoadedAtContext) {
+      await loadModel(runner, modelKey, { contextLength, gpuOffloadLayers: gpuOffload, kvCacheQuant: "Q8_0" });
+    }
     const result = await client.completion({ model: modelKey, prompt: PHASE3_PROMPT, maxTokens: PHASE3_MAX_TOKENS });
     const snapshot = await hardware.getSnapshot();
 
@@ -125,12 +135,16 @@ export interface Phase3Deps {
 
 export async function runPhase3(model: ModelConfig, deps: Phase3Deps): Promise<Phase3TuningProfile> {
   const { offload } = await resolveGpuOffload(deps.runner, deps.hardware, model.modelKey, CONTEXT_LADDER[0]);
+  // resolveGpuOffload already left the model loaded at CONTEXT_LADDER[0] with
+  // the winning offload — tell the ladder so it doesn't immediately redo that
+  // exact same load.
   const { maxRecommendedContext, ladderHistory } = await runContextLadder(
     deps.runner,
     deps.client,
     deps.hardware,
     model.modelKey,
     offload,
+    CONTEXT_LADDER[0],
   );
 
   return {
