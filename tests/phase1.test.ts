@@ -42,7 +42,8 @@ describe("runPhase1", () => {
     expect(result.passed).toBe(true);
     expect(result.tokPerSec).toBe(15.5);
     expect(result.modelKey).toBe("model-a");
-    expect(calls[0]).toEqual({
+    // calls[0] is the pre-load `lms unload --all` loadModel() now always issues.
+    expect(calls[1]).toEqual({
       cmd: "lms",
       args: ["load", "model-a", "--context-length", String(PHASE1_CONTEXT_LENGTH), "--yes"],
     });

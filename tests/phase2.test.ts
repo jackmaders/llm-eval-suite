@@ -87,7 +87,8 @@ describe("runPhase2", () => {
     const result = await runPhase2(model, { runner: spiedRunner, client });
 
     expect(result.passed).toBe(true);
-    expect(spy[0]).toContain(String(PHASE2_CONTEXT_LENGTH));
+    // spy[0] is the pre-load `lms unload --all` loadModel() now always issues.
+    expect(spy[1]).toContain(String(PHASE2_CONTEXT_LENGTH));
   });
 
   test("discards a model producing malformed JSON", async () => {
