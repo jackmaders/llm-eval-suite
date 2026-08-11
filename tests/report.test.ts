@@ -18,6 +18,7 @@ describe("generateMarkdownReport", () => {
     lastUpdated: "2026-08-10T12:00:00.000Z",
     completedPhases: {
       "model-a": {
+        quant: "Q4_K_M",
         phase1Passed: true,
         phase2Passed: true,
         phase3Profile: {
@@ -63,6 +64,22 @@ describe("generateMarkdownReport", () => {
     const report = generateMarkdownReport(state);
     expect(report).toContain("model-b");
     expect(report).toContain("Fail (3.2 tok/s)");
+  });
+
+  test("shows the model's currently-selected quant even though it can't be changed", () => {
+    const report = generateMarkdownReport(state);
+    const modelARow = report.split("\n").find((line) => line.startsWith("| model-a "));
+    expect(modelARow).toContain("Q4_K_M");
+  });
+
+  test("shows a quant placeholder for a model discarded before any quant was recorded", () => {
+    const noQuant: PipelineState = {
+      lastUpdated: "now",
+      completedPhases: { "model-unknown": { phase1Passed: false, phase1TokPerSec: 1 } },
+    };
+    const report = generateMarkdownReport(noQuant);
+    const row = report.split("\n").find((line) => line.startsWith("| model-unknown "));
+    expect(row).toContain("—");
   });
 
   test("shows the measured Phase 1 speed for a model that passed, not just for failures", () => {

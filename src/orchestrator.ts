@@ -136,7 +136,14 @@ export async function runPipeline(deps: OrchestratorDeps): Promise<OrchestratorR
       continue;
     }
 
-    console.log(`\n=== ${model.modelKey} ===`);
+    // Recorded up front — known from discovery regardless of which phase (if
+    // any) this model reaches, and it can't be changed by this suite anyway
+    // (see the file header note in config.ts), so it's worth showing even
+    // for a model discarded before Phase 3 ever runs.
+    state = withPhaseUpdate(state, model.modelKey, { quant: model.quant }, now);
+    await saveStateAtomic(deps.statePath, state);
+
+    console.log(`\n=== ${model.modelKey} (${model.quant}) ===`);
 
     // Phase 1: High-Speed Ping Filter. Skipped entirely (no run, no discard
     // gate) when 1 isn't in the requested phase set — --phases lets you
@@ -148,7 +155,7 @@ export async function runPipeline(deps: OrchestratorDeps): Promise<OrchestratorR
         logPhase(
           model.modelKey,
           "Phase 1",
-          `${result.tokPerSec.toFixed(2)} tok/sec (need >= ${PHASE1_MIN_TOK_PER_SEC} tok/sec) — ${result.passed ? "PASS" : "FAIL"}`,
+          `${result.passed ? "PASS" : "FAIL"} - ${result.tokPerSec.toFixed(2)} tok/sec (need >= ${PHASE1_MIN_TOK_PER_SEC} tok/sec)`,
         );
         state = withPhaseUpdate(
           state,
@@ -175,7 +182,7 @@ export async function runPipeline(deps: OrchestratorDeps): Promise<OrchestratorR
           client: deps.client,
           failureLogDir: join(deps.dataDir, "phase2-failures"),
         });
-        logPhase(model.modelKey, "Phase 2", result.passed ? "PASS" : `FAIL — ${result.reason ?? "unknown reason"}`);
+        logPhase(model.modelKey, "Phase 2", result.passed ? "PASS" : `FAIL - ${result.reason ?? "unknown reason"}`);
         if (!result.passed) {
           console.log(`${model.modelKey} — raw Phase 2 response saved to ${join(deps.dataDir, "phase2-failures")}`);
         }

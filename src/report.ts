@@ -51,6 +51,7 @@ function renderRow(modelKey: string, phases: CompletedPhases): string[] {
 
   return [
     modelKey,
+    phases.quant ?? PLACEHOLDER,
     phase1Cell(phases),
     phase2Cell(phases),
     profile ? String(profile.maxRecommendedContext) : PLACEHOLDER,
@@ -94,6 +95,7 @@ export function generateMarkdownReport(state: PipelineState): string {
 
   const headers = [
     "Model",
+    "Quant",
     "Phase 1 (Speed)",
     "Phase 2 (Sanity)",
     "Max Context",
@@ -109,7 +111,9 @@ export function generateMarkdownReport(state: PipelineState): string {
   lines.push("");
   lines.push(
     "_Max Context reflects the last context-ladder step that did not trip a guardrail " +
-      "(system RAM ≥ 90%, shared GPU memory ≥ 300MB, or ≥ 15% decode-speed regression vs. the 8k baseline)._",
+      "(system RAM ≥ 90%, shared GPU memory ≥ 300MB, or ≥ 15% decode-speed regression vs. the 8k baseline). " +
+      "Quant is whichever variant is currently selected for that model in LM Studio — this suite cannot switch " +
+      "it (lmstudio-ai/lmstudio-bug-tracker#1462); see the Quant Note column/section below for what to try instead._",
   );
   lines.push(...renderQuantizationNotes(modelKeys, state.completedPhases));
 

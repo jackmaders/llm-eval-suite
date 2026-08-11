@@ -89,12 +89,17 @@ line leads with the model name so a long run reads top-to-bottom as one
 model's whole story before moving to the next:
 
 ```
-=== qwen2.5-coder-32b-instruct ===
-qwen2.5-coder-32b-instruct — Phase 1: 23.40 tok/sec (need >= 10 tok/sec) — PASS
+=== qwen2.5-coder-32b-instruct (Q4_K_M) ===
+qwen2.5-coder-32b-instruct — Phase 1: PASS - 23.40 tok/sec (need >= 10 tok/sec)
 qwen2.5-coder-32b-instruct — Phase 2: PASS
 qwen2.5-coder-32b-instruct — Phase 3: max context 32768, GPU offload max, KV cache Q8_0
 qwen2.5-coder-32b-instruct — Phase 4: 86.7% pass rate, 1 syntax errors, decode 24.5 tok/s (decay 3.2%)
 ```
+
+The banner also shows the currently-selected quant — known from discovery
+(`lms ls --json --variants` reports it) even though this suite can't change
+it — and the report carries a matching "Quant" column, recorded up front for
+every model so it's visible even for one discarded before Phase 3 ever runs.
 
 ## Prerequisites
 

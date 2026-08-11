@@ -269,7 +269,11 @@ describe("runPipeline", () => {
     expect(calls).toEqual(["phase1:model-a", "phase1:model-b"]);
     const persisted = await loadState(paths.statePath);
     expect(persisted?.completedPhases["model-a"]?.phase4Metrics).toBeDefined();
-    expect(persisted?.completedPhases["model-b"]).toBeUndefined();
+    // The quant is recorded up front (known from discovery, before any phase
+    // runs), so model-b has a partial record rather than none at all — but
+    // nothing phase-related, since it crashed before phase1 completed.
+    expect(persisted?.completedPhases["model-b"]).toEqual({ quant: "Q4_K_M" });
+    expect(persisted?.completedPhases["model-b"]?.phase1Passed).toBeUndefined();
   });
 
   test("--phases restricts which phases run and skips the discard gate for phases not requested", async () => {

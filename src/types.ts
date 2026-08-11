@@ -41,6 +41,13 @@ export interface BenchmarkMetrics {
 }
 
 export interface CompletedPhases {
+  /**
+   * The quantization LM Studio currently has selected for this model —
+   * recorded up front for every model, since it can't be changed by this
+   * suite (see lmstudio-ai/lmstudio-bug-tracker#1462) but is still useful
+   * context even for a model discarded before Phase 3 ever runs.
+   */
+  quant?: string;
   phase1Passed?: boolean;
   /** Measured decode tok/sec from the Phase 1 ping, kept regardless of pass/fail for diagnostics. */
   phase1TokPerSec?: number;
