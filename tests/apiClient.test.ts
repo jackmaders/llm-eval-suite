@@ -46,6 +46,33 @@ describe("LmStudioClient.completion", () => {
     expect((capturedRequest?.body as Record<string, unknown>).stream).toBe(true);
   });
 
+  test("regression: falls back to counting delta events when the server never sends a usage chunk", async () => {
+    // Some LM Studio/llama.cpp server configurations don't honor
+    // stream_options.include_usage on /v1/completions and simply never send
+    // a trailing usage chunk. Previously this left completionTokens at its
+    // initial 0, so decodeTokPerSec was always 0 — failing every model in
+    // Phase 1's >=10 tok/sec gate regardless of its real speed.
+    const events = Array.from({ length: 5 }, (_, i) => JSON.stringify({ choices: [{ text: `tok${i} ` }] }));
+    const fetchImpl = (async () => sseResponse(events)) as unknown as typeof fetch; // no usage arg -> none sent
+    const client = new LmStudioClient({ baseUrl: "http://127.0.0.1:1234/v1", fetchImpl });
+
+    const result = await client.completion({ model: "test-model", prompt: "hi there", maxTokens: 10 });
+
+    expect(result.completionTokens).toBe(5);
+    expect(result.promptTokens).toBeGreaterThan(0);
+    expect(result.decodeTokPerSec).toBeGreaterThan(0);
+  });
+
+  test("prefers server-reported usage over the delta-count fallback when both are available", async () => {
+    const events = [JSON.stringify({ choices: [{ text: "a" }] }), JSON.stringify({ choices: [{ text: "b" }] })];
+    const fetchImpl = (async () => sseResponse(events, { prompt_tokens: 40, completion_tokens: 2 })) as unknown as typeof fetch;
+    const client = new LmStudioClient({ baseUrl: "http://127.0.0.1:1234/v1", fetchImpl });
+
+    const result = await client.completion({ model: "test-model", prompt: "hi", maxTokens: 10 });
+    expect(result.completionTokens).toBe(2);
+    expect(result.promptTokens).toBe(40);
+  });
+
   test("wraps a connection-refused failure in ServerCrashError", async () => {
     const fetchImpl = (async () => {
       const err = new TypeError("fetch failed");

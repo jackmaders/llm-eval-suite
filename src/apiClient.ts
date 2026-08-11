@@ -100,6 +100,8 @@ export class LmStudioClient {
     let text = "";
     let promptTokens = 0;
     let completionTokens = 0;
+    let deltaCount = 0;
+    let usageReported = false;
     let firstTokenAt: number | undefined;
 
     const reader = response.body.getReader();
@@ -124,12 +126,25 @@ export class LmStudioClient {
         if (delta) {
           if (firstTokenAt === undefined) firstTokenAt = this.now();
           text += delta;
+          deltaCount++;
         }
         if (chunk.usage) {
+          usageReported = true;
           promptTokens = chunk.usage.prompt_tokens ?? promptTokens;
           completionTokens = chunk.usage.completion_tokens ?? completionTokens;
         }
       }
+    }
+
+    // Some LM Studio/llama.cpp server configurations don't honor
+    // `stream_options.include_usage` on /v1/completions and never send a
+    // trailing usage chunk — silently leaving completionTokens at 0 would
+    // report every model as generating at 0 tok/sec. Fall back to counting
+    // SSE delta events (one token each, for typical llama.cpp streaming) and
+    // a rough chars-per-token estimate for the prompt.
+    if (!usageReported) {
+      completionTokens = deltaCount;
+      promptTokens = Math.max(1, Math.ceil(req.prompt.length / 4));
     }
 
     const end = this.now();
