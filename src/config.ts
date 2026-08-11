@@ -46,11 +46,35 @@ function readModelEntry(obj: Record<string, unknown>): ModelConfig | undefined {
 }
 
 /**
+ * Parses the Hugging Face `owner/repo` and GGUF filename out of the
+ * `indexedModelIdentifier` LM Studio reports for a variant, e.g.
+ * `"mistralai/magistral-small-2509@lmstudio-community/Magistral-Small-2509-GGUF/Magistral-Small-2509-Q4_K_M.gguf"`
+ * -> `{ repoId: "lmstudio-community/Magistral-Small-2509-GGUF", fileName: "Magistral-Small-2509-Q4_K_M.gguf" }`.
+ * Returns undefined for anything that doesn't look like this shape (e.g. a
+ * locally-imported model with no Hugging Face provenance) — used to look up
+ * a model's full remote quantization catalog (see remoteQuants.ts).
+ */
+export function parseHfRepoFromIdentifier(identifier: string): { repoId: string; fileName: string } | undefined {
+  const atIndex = identifier.lastIndexOf("@");
+  const remainder = atIndex === -1 ? identifier : identifier.slice(atIndex + 1);
+  const parts = remainder.split("/").filter((p) => p.length > 0);
+  if (parts.length < 3) return undefined;
+
+  const fileName = parts[parts.length - 1]!;
+  if (!fileName.toLowerCase().endsWith(".gguf")) return undefined;
+
+  return { repoId: parts.slice(0, -1).join("/"), fileName };
+}
+
+/**
  * Reads the single loadable candidate out of one `lms ls --json --variants`
  * array entry. `--variants` groups each base model as `{ model, variants }`,
  * but only `model`'s own (unsuffixed) modelKey is ever accepted by `lms
  * load` — the individual `variants[].modelKey` "@quant" identifiers are
- * display-only (see the file header note).
+ * display-only (see the file header note). The grouped shape also carries
+ * two things read here for later use (recommendation/remote-catalog
+ * checks): every quantization already downloaded locally, and the Hugging
+ * Face repo the currently-selected variant was published under.
  */
 function readListEntry(item: unknown): ModelConfig {
   if (typeof item === "string") {
@@ -64,6 +88,28 @@ function readListEntry(item: unknown): ModelConfig {
   const inner = obj.model && typeof obj.model === "object" ? (obj.model as Record<string, unknown>) : obj;
   const model = readModelEntry(inner);
   if (!model) throw new Error(`unrecognized \`lms ls\` entry: ${JSON.stringify(item)}`);
+
+  const variants = Array.isArray(obj.variants) ? obj.variants : undefined;
+  if (!variants) return model;
+
+  const locallyAvailableQuants = variants
+    .map((v) => (v && typeof v === "object" ? readModelEntry(v as Record<string, unknown>)?.quant : undefined))
+    .filter((q): q is string => Boolean(q));
+  if (locallyAvailableQuants.length > 0) model.locallyAvailableQuants = locallyAvailableQuants;
+
+  const selectedVariant = typeof inner.selectedVariant === "string" ? inner.selectedVariant : undefined;
+  const selectedVariantObj = selectedVariant
+    ? variants.find((v) => v && typeof v === "object" && (v as Record<string, unknown>).modelKey === selectedVariant)
+    : undefined;
+  const identifier =
+    selectedVariantObj && typeof selectedVariantObj === "object"
+      ? (selectedVariantObj as Record<string, unknown>).indexedModelIdentifier
+      : undefined;
+  if (typeof identifier === "string") {
+    const hf = parseHfRepoFromIdentifier(identifier);
+    if (hf) model.hfRepoId = hf.repoId;
+  }
+
   return model;
 }
 

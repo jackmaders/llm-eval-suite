@@ -9,6 +9,14 @@ Target environment: Windows 11, LM Studio's local server on
 `http://127.0.0.1:1234`, models managed via the `lms` CLI, and hardware
 telemetry sampled through PowerShell (`Get-CimInstance`, `Get-Counter`).
 
+Total VRAM is read from the registry (`HardwareInformation.qwMemorySize`
+under each display adapter's driver key), not `Win32_VideoController.AdapterRAM`
+— that WMI property is a 32-bit field that caps/wraps at 4GB for any GPU with
+more VRAM than that (a well-documented Windows limitation), which silently
+reported ~4095MB "total" on a 16GB card and made Phase 3's free-VRAM
+guardrail reject every offload level even on a model that was clearly running
+fine in VRAM.
+
 ## How it works
 
 Candidate models are **discovered live** by shelling out to
@@ -137,6 +145,16 @@ The banner also shows the currently-selected quant — known from discovery
 it — and the report carries a matching "Quant" column, recorded up front for
 every model so it's visible even for one discarded before Phase 3 ever runs.
 
+With `--check-remote-quants`, a Quantization Notes recommendation ("try
+Q4_K_S instead of Q4_K_M") also says whether that quant needs downloading:
+`lms get` has no non-interactive/JSON listing mode, so this queries Hugging
+Face's public API directly using the repo id recovered from discovery's
+`indexedModelIdentifier` field, and reports whether the suggested quant is
+already downloaded, published and downloadable, or not published under that
+repo at all. Best-effort throughout — a model not hosted on HF, a renamed
+repo, or a network hiccup just skips the note for that model rather than
+failing anything.
+
 ## Prerequisites
 
 - [Bun](https://bun.sh) 1.3+
@@ -162,6 +180,7 @@ bun run src/index.ts            # fresh run, all four phases
 bun run src/index.ts --resume   # resume from data/.pipeline_state.json
 bun run src/index.ts --phases=1,2         # only run the fast filters
 bun run src/index.ts --phases=3 --resume  # re-tune Phase 3 for models that already have phase1/2 recorded
+bun run src/index.ts --check-remote-quants  # also check Hugging Face for downloadable quant recommendations
 ```
 
 `--phases` restricts which phases run this invocation (default: all four,

@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { discoverModels, extractQuant, findUnevaluatedVariantWarnings, parseLmsLsModels } from "../src/config";
+import {
+  discoverModels,
+  extractQuant,
+  findUnevaluatedVariantWarnings,
+  parseHfRepoFromIdentifier,
+  parseLmsLsModels,
+} from "../src/config";
 import type { CommandRunner } from "../src/subprocess";
 
 describe("extractQuant", () => {
@@ -91,8 +97,8 @@ describe("parseLmsLsModels", () => {
     ]);
 
     expect(parseLmsLsModels(raw)).toEqual([
-      { modelKey: "qwen/qwen3.6-27b", quant: "Q4_K_M" },
-      { modelKey: "mistralai/codestral-22b-v0.1", quant: "Q4_K_M" },
+      { modelKey: "qwen/qwen3.6-27b", quant: "Q4_K_M", locallyAvailableQuants: ["Q4_K_M", "Q6_K"] },
+      { modelKey: "mistralai/codestral-22b-v0.1", quant: "Q4_K_M", locallyAvailableQuants: ["Q4_K_M"] },
     ]);
   });
 
@@ -108,8 +114,46 @@ describe("parseLmsLsModels", () => {
       },
     ]);
     const models = parseLmsLsModels(raw);
-    expect(models).toEqual([{ modelKey: "mistralai/magistral-small-2509", quant: "Q4_K_M" }]);
+    expect(models).toEqual([
+      { modelKey: "mistralai/magistral-small-2509", quant: "Q4_K_M", locallyAvailableQuants: ["Q4_K_M"] },
+    ]);
     expect(models[0]?.modelKey).not.toContain("@");
+  });
+
+  test("extracts the Hugging Face repo id from the selected variant's indexedModelIdentifier", () => {
+    // Real shape from `lms ls --json --variants`: the variant matching
+    // model.selectedVariant carries an indexedModelIdentifier embedding the
+    // Hugging Face repo the GGUF was published under.
+    const raw = JSON.stringify([
+      {
+        model: {
+          modelKey: "mistralai/magistral-small-2509",
+          quantization: { name: "Q4_K_M", bits: 4 },
+          selectedVariant: "mistralai/magistral-small-2509@q4_k_m",
+        },
+        variants: [
+          {
+            modelKey: "mistralai/magistral-small-2509@q4_k_m",
+            quantization: { name: "Q4_K_M", bits: 4 },
+            indexedModelIdentifier:
+              "mistralai/magistral-small-2509@lmstudio-community/Magistral-Small-2509-GGUF/Magistral-Small-2509-Q4_K_M.gguf",
+          },
+        ],
+      },
+    ]);
+    const models = parseLmsLsModels(raw);
+    expect(models[0]?.hfRepoId).toBe("lmstudio-community/Magistral-Small-2509-GGUF");
+  });
+
+  test("omits hfRepoId when no variant matches selectedVariant, or none carries an identifier", () => {
+    const raw = JSON.stringify([
+      {
+        model: { modelKey: "model-a", quantization: { name: "Q4_K_M", bits: 4 } },
+        variants: [{ modelKey: "model-a@q4_k_m", quantization: { name: "Q4_K_M", bits: 4 } }],
+      },
+    ]);
+    const models = parseLmsLsModels(raw);
+    expect(models[0]?.hfRepoId).toBeUndefined();
   });
 
   test("throws on a recognized-JSON-but-unexpected shape instead of silently mangling it into text lines", () => {
@@ -119,6 +163,30 @@ describe("parseLmsLsModels", () => {
     // the entire JSON blob — which was then handed straight to `lms load`.
     const raw = JSON.stringify([{ nothingRecognizable: true }]);
     expect(() => parseLmsLsModels(raw)).toThrow(/unrecognized/i);
+  });
+});
+
+describe("parseHfRepoFromIdentifier", () => {
+  test("extracts owner/repo and filename from a real indexedModelIdentifier", () => {
+    const result = parseHfRepoFromIdentifier(
+      "mistralai/magistral-small-2509@lmstudio-community/Magistral-Small-2509-GGUF/Magistral-Small-2509-Q4_K_M.gguf",
+    );
+    expect(result).toEqual({
+      repoId: "lmstudio-community/Magistral-Small-2509-GGUF",
+      fileName: "Magistral-Small-2509-Q4_K_M.gguf",
+    });
+  });
+
+  test("returns undefined when there's no '@' separator", () => {
+    expect(parseHfRepoFromIdentifier("just-a-plain-path/file.gguf")).toBeUndefined();
+  });
+
+  test("returns undefined when the identifier doesn't end in .gguf", () => {
+    expect(parseHfRepoFromIdentifier("model@publisher/repo/README.md")).toBeUndefined();
+  });
+
+  test("returns undefined when there aren't enough path segments to form owner/repo/file", () => {
+    expect(parseHfRepoFromIdentifier("model@repo/file.gguf")).toBeUndefined();
   });
 });
 
@@ -188,7 +256,9 @@ describe("discoverModels", () => {
 
     const models = await discoverModels(runner);
     expect(calls[0]).toEqual({ cmd: "lms", args: ["ls", "--json", "--variants"] });
-    expect(models).toEqual([{ modelKey: "publisher/model-a-GGUF", quant: "Q4_K_M" }]);
+    expect(models).toEqual([
+      { modelKey: "publisher/model-a-GGUF", quant: "Q4_K_M", locallyAvailableQuants: ["Q4_K_M", "Q8_0"] },
+    ]);
   });
 
   test("propagates a non-zero exit code from lms ls as an error", async () => {

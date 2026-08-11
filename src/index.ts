@@ -14,6 +14,7 @@ const STATE_PATH = join(DATA_DIR, ".pipeline_state.json");
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const resume = args.includes("--resume");
+  const checkRemoteQuants = args.includes("--check-remote-quants");
 
   const runner = new BunCommandRunner();
   const client = new LmStudioClient();
@@ -23,6 +24,9 @@ async function main(): Promise<void> {
     const phases = parsePhasesFlag(args);
     console.log(`llm-eval-suite starting${resume ? " (resuming prior run)" : ""}...`);
     console.log(`Running phase(s): ${[...phases].sort().join(", ")}`);
+    if (checkRemoteQuants) {
+      console.log("Will check Hugging Face for downloadable quants behind any recommendation (--check-remote-quants).");
+    }
     console.log("Discovering candidate models via `lms ls --json --variants`...");
 
     const { reportPath, state } = await runPipeline({
@@ -30,6 +34,7 @@ async function main(): Promise<void> {
       dataDir: DATA_DIR,
       resume,
       phases,
+      checkRemoteQuants,
       runner,
       client,
       hardware,

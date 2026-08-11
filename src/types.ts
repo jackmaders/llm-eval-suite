@@ -3,6 +3,10 @@
 export interface ModelConfig {
   modelKey: string;
   quant: string;
+  /** Every quantization already downloaded locally for this base model, including `quant`. */
+  locallyAvailableQuants?: string[];
+  /** The Hugging Face `owner/repo` this GGUF was published under, when derivable from discovery. */
+  hfRepoId?: string;
 }
 
 export interface HardwareSnapshot {
@@ -40,6 +44,16 @@ export interface BenchmarkMetrics {
   thermalDecayPercent: number;
 }
 
+/** Result of the opt-in --check-remote-quants lookup (see remoteQuants.ts). */
+export interface DownloadRecommendationCheck {
+  repoId: string;
+  /** Every quantization Hugging Face has published for this model. */
+  availableQuants: string[];
+  recommendedQuantAlreadyLocal: boolean;
+  /** True only when the recommendation is genuinely new — published on HF and not already downloaded. */
+  recommendedQuantDownloadable: boolean;
+}
+
 export interface CompletedPhases {
   /**
    * The quantization LM Studio currently has selected for this model —
@@ -66,6 +80,8 @@ export interface CompletedPhases {
    */
   discardedAt?: "DISCARDED_PHASE1" | "DISCARDED_PHASE2" | "ERRORED_PHASE1" | "ERRORED_PHASE2" | "ERRORED_PHASE3" | "ERRORED_PHASE4";
   errorMessage?: string;
+  /** Set only when --check-remote-quants is on and there was a quant recommendation worth checking. */
+  downloadRecommendation?: DownloadRecommendationCheck;
 }
 
 export interface PipelineState {

@@ -69,15 +69,32 @@ function renderRow(modelKey: string, phases: CompletedPhases): string[] {
   ];
 }
 
+/**
+ * Appends download status to a quant recommendation when --check-remote-quants
+ * ran (see remoteQuants.ts) — otherwise the note only ever says "try X" with
+ * no way to tell whether X needs downloading first.
+ */
+function downloadNote(download: CompletedPhases["downloadRecommendation"]): string {
+  if (!download) return "";
+  if (download.recommendedQuantAlreadyLocal) {
+    return " Already downloaded — just switch the selected variant in LM Studio.";
+  }
+  if (download.recommendedQuantDownloadable) {
+    return ` Not downloaded yet — available at https://huggingface.co/${download.repoId}.`;
+  }
+  return ` Not published in ${download.repoId} (available there: ${download.availableQuants.join(", ") || "none found"}).`;
+}
+
 /** Full-sentence quantization-note callouts for the section below the table. */
 function renderQuantizationNotes(modelKeys: string[], completedPhases: PipelineState["completedPhases"]): string[] {
   const notes = modelKeys.flatMap((modelKey) => {
-    const profile = completedPhases[modelKey]?.phase3Profile;
+    const phases = completedPhases[modelKey];
+    const profile = phases?.phase3Profile;
     if (!profile) return [];
     const rec = recommendQuantChange(profile);
     if (!rec) return [];
     const suggestion = rec.suggestedQuant ? ` Try ${rec.suggestedQuant} instead of ${profile.quant}.` : "";
-    return [`- **${modelKey}**: ${rec.reason}${suggestion}`];
+    return [`- **${modelKey}**: ${rec.reason}${suggestion}${downloadNote(phases?.downloadRecommendation)}`];
   });
 
   if (notes.length === 0) return [];

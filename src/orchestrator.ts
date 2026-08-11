@@ -12,6 +12,8 @@ import { runPhase2 } from "./phases/phase2";
 import { runPhase3 } from "./phases/phase3";
 import { runPhase4 } from "./phases/phase4";
 import { generateMarkdownReport } from "./report";
+import { recommendQuantChange } from "./recommendation";
+import { checkDownloadRecommendation } from "./remoteQuants";
 import { createLoadCapabilities, unloadAll } from "./lmsCli";
 import {
   emptyState,
@@ -35,6 +37,10 @@ export interface OrchestratorDeps {
   resume: boolean;
   /** Which phases to actually run this invocation. Defaults to all four (ALL_PHASES). */
   phases?: ReadonlySet<PhaseNumber>;
+  /** Opt-in: query Hugging Face for whether a recommended quant is downloadable. Default false. */
+  checkRemoteQuants?: boolean;
+  /** Injectable for testing; defaults to the real global fetch. Only used when checkRemoteQuants is true. */
+  remoteQuantFetch?: typeof fetch;
   runner: CommandRunner;
   client: Pick<LmStudioClient, "completion" | "healthCheck">;
   hardware: HardwareProvider;
@@ -233,6 +239,24 @@ export async function runPipeline(deps: OrchestratorDeps): Promise<OrchestratorR
           `max context ${profile.maxRecommendedContext}, GPU offload ${profile.verifiedGpuOffload}, KV cache ${profile.kvCacheQuant}`,
         );
         state = withPhaseUpdate(state, model.modelKey, { phase3Profile: profile }, now);
+
+        if (deps.checkRemoteQuants) {
+          const suggestedQuant = recommendQuantChange(profile)?.suggestedQuant;
+          const downloadCheck = await checkDownloadRecommendation(model, suggestedQuant, deps.remoteQuantFetch);
+          if (downloadCheck) {
+            logPhase(
+              model.modelKey,
+              "Phase 3",
+              downloadCheck.recommendedQuantDownloadable
+                ? `${suggestedQuant} is not downloaded but is available at https://huggingface.co/${downloadCheck.repoId}`
+                : downloadCheck.recommendedQuantAlreadyLocal
+                  ? `${suggestedQuant} is already downloaded — just switch the selected variant in LM Studio`
+                  : `${suggestedQuant} isn't published in ${downloadCheck.repoId} (available: ${downloadCheck.availableQuants.join(", ") || "none found"})`,
+            );
+            state = withPhaseUpdate(state, model.modelKey, { downloadRecommendation: downloadCheck }, now);
+          }
+        }
+
         await saveStateAtomic(deps.statePath, state);
       }
 

@@ -184,6 +184,63 @@ describe("generateMarkdownReport", () => {
     expect(report).toMatch(/RAM.*ceiling|ceiling.*RAM|close to its RAM/i);
   });
 
+  test("appends download status to a quant recommendation when --check-remote-quants ran", () => {
+    const base: PipelineState["completedPhases"][string] = {
+      phase1Passed: true,
+      phase2Passed: true,
+      phase3Profile: {
+        modelKey: "model-tight",
+        quant: "Q4_K_M",
+        verifiedGpuOffload: "max",
+        kvCacheQuant: "Q8_0",
+        maxRecommendedContext: 8192,
+        ladderHistory: [
+          {
+            contextLength: 8192,
+            prefillTokPerSec: 400,
+            decodeTokPerSec: 20,
+            timeToFirstTokenMs: 100,
+            snapshot: { ramUsedPercent: 88, ramUsedGB: 28, dedicatedVramFreeMB: 1200, sharedGpuMemoryMB: 0 },
+            speedDropPercent: 0,
+          },
+        ],
+      },
+    };
+
+    const downloadable = generateMarkdownReport({
+      lastUpdated: "now",
+      completedPhases: {
+        "model-tight": {
+          ...base,
+          downloadRecommendation: {
+            repoId: "lmstudio-community/Model-GGUF",
+            availableQuants: ["Q4_K_M", "Q4_K_S"],
+            recommendedQuantAlreadyLocal: false,
+            recommendedQuantDownloadable: true,
+          },
+        },
+      },
+    });
+    expect(downloadable).toContain("huggingface.co/lmstudio-community/Model-GGUF");
+    expect(downloadable).toContain("Not downloaded yet");
+
+    const alreadyLocal = generateMarkdownReport({
+      lastUpdated: "now",
+      completedPhases: {
+        "model-tight": {
+          ...base,
+          downloadRecommendation: {
+            repoId: "lmstudio-community/Model-GGUF",
+            availableQuants: ["Q4_K_M", "Q4_K_S"],
+            recommendedQuantAlreadyLocal: true,
+            recommendedQuantDownloadable: false,
+          },
+        },
+      },
+    });
+    expect(alreadyLocal).toContain("Already downloaded");
+  });
+
   test("flags a model with unused headroom with a larger-quant suggestion", () => {
     const loose: PipelineState = {
       lastUpdated: "now",

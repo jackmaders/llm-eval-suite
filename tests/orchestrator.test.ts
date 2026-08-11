@@ -418,6 +418,138 @@ describe("runPipeline", () => {
     expect(result.state.completedPhases["model-a"]?.phase3Profile).toBeUndefined();
   });
 
+  test("checkRemoteQuants: queries Hugging Face for a downloadable recommendation and records it", async () => {
+    // Uses the real `--variants`-grouped `lms ls` shape (rather than
+    // baseDeps' flat fixture) since hfRepoId/locallyAvailableQuants are
+    // derived from that shape by discoverModels(), not settable directly.
+    const { deps } = baseDeps([]);
+    const runner: CommandRunner = {
+      run: async (cmd, args) => {
+        if (cmd === "lms" && args[0] === "ls") {
+          return {
+            stdout: JSON.stringify([
+              {
+                model: {
+                  modelKey: "model-a",
+                  quantization: { name: "Q4_K_M", bits: 4 },
+                  selectedVariant: "model-a@q4_k_m",
+                },
+                variants: [
+                  {
+                    modelKey: "model-a@q4_k_m",
+                    quantization: { name: "Q4_K_M", bits: 4 },
+                    indexedModelIdentifier: "model-a@lmstudio-community/Model-A-GGUF/Model-A-Q4_K_M.gguf",
+                  },
+                ],
+              },
+            ]),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    };
+
+    let fetchCalledWith: string | undefined;
+    const remoteQuantFetch = (async (url: string) => {
+      fetchCalledWith = url;
+      return new Response(
+        JSON.stringify({ siblings: [{ rfilename: "model-a-Q4_K_M.gguf" }, { rfilename: "model-a-Q6_K.gguf" }] }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+
+    const tightSnapshot = { ramUsedPercent: 90, ramUsedGB: 30, dedicatedVramFreeMB: 1000, sharedGpuMemoryMB: 0 };
+    const result = await runPipeline({
+      ...deps,
+      runner,
+      checkRemoteQuants: true,
+      remoteQuantFetch,
+      phase1: async (m) => ({ modelKey: m.modelKey, tokPerSec: 20, passed: true }),
+      phase2: async (m) => ({ modelKey: m.modelKey, passed: true }),
+      phase3: async (m) => ({
+        modelKey: m.modelKey,
+        quant: m.quant,
+        verifiedGpuOffload: "max",
+        kvCacheQuant: "Q8_0" as const,
+        maxRecommendedContext: 8192,
+        ladderHistory: [
+          {
+            contextLength: 8192,
+            prefillTokPerSec: 400,
+            decodeTokPerSec: 20,
+            timeToFirstTokenMs: 100,
+            snapshot: tightSnapshot,
+            speedDropPercent: 0,
+          },
+        ],
+      }),
+      phase4: async (m) => ({
+        modelKey: m.modelKey,
+        passRatePercent: 100,
+        syntaxErrorCount: 0,
+        avgDecodeSpeed: 10,
+        thermalDecayPercent: 0,
+        workspaceDir: "/tmp/x",
+      }),
+    });
+
+    expect(fetchCalledWith).toBe("https://huggingface.co/api/models/lmstudio-community/Model-A-GGUF");
+    const check = result.state.completedPhases["model-a"]?.downloadRecommendation;
+    expect(check?.repoId).toBe("lmstudio-community/Model-A-GGUF");
+    expect(check?.availableQuants).toEqual(["Q4_K_M", "Q6_K"]);
+  });
+
+  test("checkRemoteQuants: does not query Hugging Face when the flag is off", async () => {
+    const models: ModelConfig[] = [
+      { modelKey: "model-a", quant: "Q4_K_M", hfRepoId: "lmstudio-community/Model-A-GGUF" },
+    ];
+    const { deps } = baseDeps(models);
+
+    let fetchCalled = false;
+    const remoteQuantFetch = (async () => {
+      fetchCalled = true;
+      return new Response(JSON.stringify({ siblings: [] }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const tightSnapshot = { ramUsedPercent: 90, ramUsedGB: 30, dedicatedVramFreeMB: 1000, sharedGpuMemoryMB: 0 };
+    const result = await runPipeline({
+      ...deps,
+      remoteQuantFetch, // provided but checkRemoteQuants left undefined/false
+      phase1: async (m) => ({ modelKey: m.modelKey, tokPerSec: 20, passed: true }),
+      phase2: async (m) => ({ modelKey: m.modelKey, passed: true }),
+      phase3: async (m) => ({
+        modelKey: m.modelKey,
+        quant: m.quant,
+        verifiedGpuOffload: "max",
+        kvCacheQuant: "Q8_0" as const,
+        maxRecommendedContext: 8192,
+        ladderHistory: [
+          {
+            contextLength: 8192,
+            prefillTokPerSec: 400,
+            decodeTokPerSec: 20,
+            timeToFirstTokenMs: 100,
+            snapshot: tightSnapshot,
+            speedDropPercent: 0,
+          },
+        ],
+      }),
+      phase4: async (m) => ({
+        modelKey: m.modelKey,
+        passRatePercent: 100,
+        syntaxErrorCount: 0,
+        avgDecodeSpeed: 10,
+        thermalDecayPercent: 0,
+        workspaceDir: "/tmp/x",
+      }),
+    });
+
+    expect(fetchCalled).toBe(false);
+    expect(result.state.completedPhases["model-a"]?.downloadRecommendation).toBeUndefined();
+  });
+
   test("halts before running anything when lms ls reports no downloaded models", async () => {
     const { deps } = baseDeps([]);
 
