@@ -11,6 +11,24 @@ export interface LoadModelOptions {
   gpuOffloadLayers?: number | "max";
 }
 
+/**
+ * Remembers which `lms load` flags this CLI install has already been found
+ * not to support, so repeated loadModel() calls (Phase 3's offload/context
+ * ladder loops call it many times per model) don't each redo the same
+ * doomed attempt-then-retry cycle — one extra unload/load cycle per attempt,
+ * which is worth avoiding on its own merits (see the native-crash note in
+ * phase3.ts). Share ONE instance across an entire run (created once by the
+ * orchestrator) so the very first failure anywhere teaches every later call,
+ * for every model, not just repeats within one model's own loads.
+ */
+export interface LoadCapabilities {
+  kvCacheQuantSupported?: boolean;
+}
+
+export function createLoadCapabilities(): LoadCapabilities {
+  return {};
+}
+
 async function runUnloadAll(runner: CommandRunner) {
   return runner.run("lms", ["unload", "--all"]);
 }
@@ -34,7 +52,12 @@ function isUnknownOptionError(stderr: string, flag: string): boolean {
   return new RegExp(`unknown option ['"]?${escaped}\\b`, "i").test(stderr);
 }
 
-export async function loadModel(runner: CommandRunner, modelKey: string, opts: LoadModelOptions): Promise<void> {
+export async function loadModel(
+  runner: CommandRunner,
+  modelKey: string,
+  opts: LoadModelOptions,
+  capabilities: LoadCapabilities = {},
+): Promise<void> {
   // Unload whatever's currently loaded first. `lms load` on top of an
   // already-loaded model can stack a second instance alongside it — or leave
   // API requests resolving against whichever instance LM Studio picks —
@@ -51,17 +74,25 @@ export async function loadModel(runner: CommandRunner, modelKey: string, opts: L
     );
   }
 
-  let result = await runner.run("lms", buildLoadArgs(modelKey, opts));
+  // Already know this CLI doesn't support it — don't repeat the doomed attempt.
+  const shouldTryKvCacheQuant = Boolean(opts.kvCacheQuant) && capabilities.kvCacheQuantSupported !== false;
+  const attemptOpts = shouldTryKvCacheQuant ? opts : { ...opts, kvCacheQuant: undefined };
+
+  let result = await runner.run("lms", buildLoadArgs(modelKey, attemptOpts));
 
   // Older `lms` CLI versions predate --kv-cache-quant and reject it outright
   // rather than ignoring it. Rather than aborting the whole run over one
   // unsupported flag, retry once without it — Q8_0 KV cache quantization
-  // just won't be applied for this model on this LM Studio install.
-  if (result.exitCode !== 0 && opts.kvCacheQuant && isUnknownOptionError(result.stderr, "--kv-cache-quant")) {
+  // just won't be applied for this model on this LM Studio install — and
+  // remember it for every later call sharing this capabilities object.
+  if (shouldTryKvCacheQuant && result.exitCode !== 0 && isUnknownOptionError(result.stderr, "--kv-cache-quant")) {
+    capabilities.kvCacheQuantSupported = false;
     console.warn(
-      `WARNING: this \`lms\` CLI does not support --kv-cache-quant; retrying "${modelKey}" without KV cache quantization.`,
+      `WARNING: this \`lms\` CLI does not support --kv-cache-quant; skipping it for the rest of this run (starting with "${modelKey}").`,
     );
     result = await runner.run("lms", buildLoadArgs(modelKey, { ...opts, kvCacheQuant: undefined }));
+  } else if (shouldTryKvCacheQuant && result.exitCode === 0) {
+    capabilities.kvCacheQuantSupported = true;
   }
 
   if (result.exitCode !== 0) {

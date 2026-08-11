@@ -72,7 +72,24 @@ cycling isn't free — LM Studio's `llama-server` backend has a known native
 memory-mapping crash
 ([ggml-org/llama.cpp#18090](https://github.com/ggml-org/llama.cpp/issues/18090))
 that a Windows run of this suite hit after several rapid cycles in under a
-minute, so every avoidable cycle is worth cutting.
+minute, so every avoidable cycle is worth cutting. The same reasoning applies
+to a KV-cache-quant probe: once any load in a run discovers the installed
+`lms` CLI doesn't support `--kv-cache-quant`, that's remembered for every
+later load — Phase 3 alone can call `loadModel` a dozen-plus times per model
+across its offload and context ladders, and previously every single one
+re-attempted and re-failed the same flag. Phase 3 also logs every offload and
+context rung it tries and the outcome, so the ladder's progress is visible
+rather than only showing up as a burst of otherwise-unexplained load/unload
+activity:
+
+```
+qwen/qwen3-30b-a3b-2507 — Phase 3: trying GPU offload max...
+qwen/qwen3-30b-a3b-2507 — Phase 3: offload max → shared GPU 450MB, free VRAM 8000MB — too tight, stepping down
+qwen/qwen3-30b-a3b-2507 — Phase 3: trying GPU offload 75%...
+qwen/qwen3-30b-a3b-2507 — Phase 3: offload 75% → shared GPU 0MB, free VRAM 8000MB — OK
+qwen/qwen3-30b-a3b-2507 — Phase 3: trying context 8192...
+qwen/qwen3-30b-a3b-2507 — Phase 3: context 8192 → decode 22.1 tok/s (drop 0.0%), RAM 45%, shared GPU 0MB — OK
+```
 
 If a phase throws instead of returning a normal pass/fail — most commonly LM
 Studio's `llama-server` engine crashing outright while loading or running one

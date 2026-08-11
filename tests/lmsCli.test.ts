@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { loadModel, unloadAll } from "../src/lmsCli";
+import { createLoadCapabilities, loadModel, unloadAll } from "../src/lmsCli";
 import type { CommandRunner } from "../src/subprocess";
 
 describe("loadModel", () => {
@@ -132,6 +132,62 @@ describe("loadModel", () => {
       loadModel(runner, "model-a", { contextLength: 8192, kvCacheQuant: "Q8_0" }),
     ).rejects.toThrow(/unknown option '--gpu'/);
     expect(loadAttempts).toBe(1);
+  });
+
+  test("remembers --kv-cache-quant is unsupported across calls sharing the same capabilities object", async () => {
+    // Reported: Phase 3's offload/context ladder loops call loadModel many
+    // times per model — without remembering the result of the first
+    // unsupported-flag detection, every single one of those repeats the same
+    // doomed attempt-then-retry cycle (seen as 7+ identical warnings for one
+    // model in one run), each one an extra unnecessary unload/load cycle.
+    const calls: Array<{ cmd: string; args: string[] }> = [];
+    let loadAttempts = 0;
+    const runner: CommandRunner = {
+      run: async (cmd, args) => {
+        calls.push({ cmd, args });
+        if (args[0] === "unload") return { stdout: "", stderr: "", exitCode: 0 };
+        loadAttempts++;
+        // Only the very first load attempt ever sees --kv-cache-quant; if a
+        // second one arrives, the "remember" behavior isn't working.
+        if (args.includes("--kv-cache-quant") && loadAttempts > 1) {
+          throw new Error("test setup violated: --kv-cache-quant attempted more than once");
+        }
+        if (args.includes("--kv-cache-quant")) {
+          return { stdout: "", stderr: "error: unknown option '--kv-cache-quant'", exitCode: 1 };
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    };
+
+    const capabilities = createLoadCapabilities();
+    await loadModel(runner, "model-a", { contextLength: 8192, kvCacheQuant: "Q8_0" }, capabilities);
+    await loadModel(runner, "model-a", { contextLength: 16384, kvCacheQuant: "Q8_0" }, capabilities);
+    await loadModel(runner, "model-b", { contextLength: 8192, kvCacheQuant: "Q8_0" }, capabilities);
+
+    // First call: unload, load-with-flag (fails), load-without-flag (succeeds) = 3.
+    // Each subsequent call already knows to skip the flag: unload, load = 2 each.
+    expect(calls).toHaveLength(3 + 2 + 2);
+    const loadCallsWithFlag = calls.filter((c) => c.args.includes("--kv-cache-quant"));
+    expect(loadCallsWithFlag).toHaveLength(1);
+  });
+
+  test("without a shared capabilities object, each call re-attempts --kv-cache-quant independently", async () => {
+    let attemptsWithFlag = 0;
+    const runner: CommandRunner = {
+      run: async (cmd, args) => {
+        if (args[0] === "unload") return { stdout: "", stderr: "", exitCode: 0 };
+        if (args.includes("--kv-cache-quant")) {
+          attemptsWithFlag++;
+          return { stdout: "", stderr: "error: unknown option '--kv-cache-quant'", exitCode: 1 };
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    };
+
+    await loadModel(runner, "model-a", { contextLength: 8192, kvCacheQuant: "Q8_0" });
+    await loadModel(runner, "model-a", { contextLength: 16384, kvCacheQuant: "Q8_0" });
+
+    expect(attemptsWithFlag).toBe(2);
   });
 });
 

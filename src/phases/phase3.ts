@@ -4,7 +4,7 @@
 // guardrail (system RAM, shared GPU memory, or decode-speed regression) trips.
 
 import type { LmStudioClient } from "../apiClient";
-import { loadModel } from "../lmsCli";
+import { createLoadCapabilities, loadModel, type LoadCapabilities } from "../lmsCli";
 import type { CommandRunner } from "../subprocess";
 import type { ContextLadderStep, HardwareSnapshot, ModelConfig, Phase3TuningProfile } from "../types";
 
@@ -45,11 +45,18 @@ export async function resolveGpuOffload(
   hardware: HardwareProvider,
   modelKey: string,
   contextLength: number,
+  capabilities: LoadCapabilities = createLoadCapabilities(),
 ): Promise<{ offload: number; snapshot: HardwareSnapshot }> {
   for (const ratio of GPU_OFFLOAD_RATIO_LADDER) {
-    await loadModel(runner, modelKey, { contextLength, gpuOffloadLayers: ratio, kvCacheQuant: "Q8_0" });
+    console.log(`${modelKey} — Phase 3: trying GPU offload ${describeOffload(ratio)}...`);
+    await loadModel(runner, modelKey, { contextLength, gpuOffloadLayers: ratio, kvCacheQuant: "Q8_0" }, capabilities);
     const snapshot = await hardware.getSnapshot();
-    if (offloadSatisfiesConstraints(snapshot)) {
+    const ok = offloadSatisfiesConstraints(snapshot);
+    console.log(
+      `${modelKey} — Phase 3: offload ${describeOffload(ratio)} → shared GPU ${snapshot.sharedGpuMemoryMB}MB, ` +
+        `free VRAM ${snapshot.dedicatedVramFreeMB}MB — ${ok ? "OK" : "too tight, stepping down"}`,
+    );
+    if (ok) {
       return { offload: ratio, snapshot };
     }
   }
@@ -79,14 +86,16 @@ export async function runContextLadder(
   modelKey: string,
   gpuOffload: number,
   alreadyLoadedAtContext?: number,
+  capabilities: LoadCapabilities = createLoadCapabilities(),
 ): Promise<{ maxRecommendedContext: number; ladderHistory: ContextLadderStep[] }> {
   const ladderHistory: ContextLadderStep[] = [];
   let maxRecommendedContext = 0;
   let baselineDecodeTokPerSec: number | undefined;
 
   for (const contextLength of CONTEXT_LADDER) {
+    console.log(`${modelKey} — Phase 3: trying context ${contextLength}...`);
     if (contextLength !== alreadyLoadedAtContext) {
-      await loadModel(runner, modelKey, { contextLength, gpuOffloadLayers: gpuOffload, kvCacheQuant: "Q8_0" });
+      await loadModel(runner, modelKey, { contextLength, gpuOffloadLayers: gpuOffload, kvCacheQuant: "Q8_0" }, capabilities);
     }
     const result = await client.completion({ model: modelKey, prompt: PHASE3_PROMPT, maxTokens: PHASE3_MAX_TOKENS });
     const snapshot = await hardware.getSnapshot();
@@ -110,6 +119,12 @@ export async function runContextLadder(
       snapshot.sharedGpuMemoryMB >= SHARED_GPU_GUARDRAIL_MB ||
       speedDropPercent >= DECODE_SPEED_DROP_GUARDRAIL_PERCENT;
 
+    console.log(
+      `${modelKey} — Phase 3: context ${contextLength} → decode ${result.decodeTokPerSec.toFixed(1)} tok/s ` +
+        `(drop ${speedDropPercent.toFixed(1)}%), RAM ${snapshot.ramUsedPercent}%, shared GPU ${snapshot.sharedGpuMemoryMB}MB ` +
+        `— ${guardrailTripped ? "guardrail tripped, stopping here" : "OK"}`,
+    );
+
     if (guardrailTripped) break;
     maxRecommendedContext = contextLength;
   }
@@ -121,7 +136,13 @@ export async function runContextLadder(
   // matches what this profile reports (Phase 4 runs against it next).
   const lastAttempted = ladderHistory[ladderHistory.length - 1]?.contextLength;
   if (maxRecommendedContext > 0 && lastAttempted !== maxRecommendedContext) {
-    await loadModel(runner, modelKey, { contextLength: maxRecommendedContext, gpuOffloadLayers: gpuOffload, kvCacheQuant: "Q8_0" });
+    console.log(`${modelKey} — Phase 3: reloading at recommended context ${maxRecommendedContext}...`);
+    await loadModel(
+      runner,
+      modelKey,
+      { contextLength: maxRecommendedContext, gpuOffloadLayers: gpuOffload, kvCacheQuant: "Q8_0" },
+      capabilities,
+    );
   }
 
   return { maxRecommendedContext, ladderHistory };
@@ -131,10 +152,25 @@ export interface Phase3Deps {
   runner: CommandRunner;
   client: Pick<LmStudioClient, "completion">;
   hardware: HardwareProvider;
+  /**
+   * Shared across every loadModel() call in this phase (and, when passed in
+   * from the orchestrator, across every other model in the run too) so an
+   * unsupported --kv-cache-quant is only ever discovered once, not re-learned
+   * on every rung of the offload/context ladders. Defaults to a fresh
+   * (per-call) instance when not provided.
+   */
+  loadCapabilities?: LoadCapabilities;
 }
 
 export async function runPhase3(model: ModelConfig, deps: Phase3Deps): Promise<Phase3TuningProfile> {
-  const { offload } = await resolveGpuOffload(deps.runner, deps.hardware, model.modelKey, CONTEXT_LADDER[0]);
+  const capabilities = deps.loadCapabilities ?? createLoadCapabilities();
+  const { offload } = await resolveGpuOffload(
+    deps.runner,
+    deps.hardware,
+    model.modelKey,
+    CONTEXT_LADDER[0],
+    capabilities,
+  );
   // resolveGpuOffload already left the model loaded at CONTEXT_LADDER[0] with
   // the winning offload — tell the ladder so it doesn't immediately redo that
   // exact same load.
@@ -145,6 +181,7 @@ export async function runPhase3(model: ModelConfig, deps: Phase3Deps): Promise<P
     model.modelKey,
     offload,
     CONTEXT_LADDER[0],
+    capabilities,
   );
 
   return {

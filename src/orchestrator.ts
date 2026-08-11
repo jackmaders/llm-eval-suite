@@ -12,7 +12,7 @@ import { runPhase2 } from "./phases/phase2";
 import { runPhase3 } from "./phases/phase3";
 import { runPhase4 } from "./phases/phase4";
 import { generateMarkdownReport } from "./report";
-import { unloadAll } from "./lmsCli";
+import { createLoadCapabilities, unloadAll } from "./lmsCli";
 import {
   emptyState,
   hasCompletedPhase1,
@@ -129,6 +129,12 @@ export async function runPipeline(deps: OrchestratorDeps): Promise<OrchestratorR
 
   let state: PipelineState = deps.resume ? ((await loadState(deps.statePath)) ?? emptyState(now)) : emptyState(now);
 
+  // Shared across every model this run — once any load discovers this `lms`
+  // CLI doesn't support --kv-cache-quant, every later model's Phase 3 skips
+  // straight past attempting it too, rather than rediscovering the same
+  // thing per model (or per ladder rung within a model).
+  const loadCapabilities = createLoadCapabilities();
+
   for (const model of models) {
     let modelPhases = currentPhases(state, model.modelKey);
 
@@ -215,7 +221,12 @@ export async function runPipeline(deps: OrchestratorDeps): Promise<OrchestratorR
       // Phase 3: Stage-Gate Hyperparameter & Context Tuner
       if (phases.has(3) && !(deps.resume && hasCompletedPhase3(state, model.modelKey))) {
         currentPhaseForError = 3;
-        const profile = await phase3Fn(model, { runner: deps.runner, client: deps.client, hardware: deps.hardware });
+        const profile = await phase3Fn(model, {
+          runner: deps.runner,
+          client: deps.client,
+          hardware: deps.hardware,
+          loadCapabilities,
+        });
         logPhase(
           model.modelKey,
           "Phase 3",
