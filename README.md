@@ -17,6 +17,18 @@ reported ~4095MB "total" on a 16GB card and made Phase 3's free-VRAM
 guardrail reject every offload level even on a model that was clearly running
 fine in VRAM.
 
+GPU **usage** is scoped to the inference engine's own process
+(`Get-Process -Name '*llama*'`, matched against `GPU Process Memory(*)`),
+not the system-wide `GPU Adapter Memory(*)` counters — confirmed on real
+hardware that those sum dedicated GPU usage across *every* process on the
+machine, including the Windows kernel process and 30+ ordinary desktop apps
+(browser tabs, terminals, Explorer), which made free VRAM come out deeply
+negative even at cpu-only GPU offload regardless of the total-VRAM fix above.
+This means `dedicatedVramFreeMB` is "headroom if only this model were using
+the GPU," not a literal whole-system free figure — a deliberate tradeoff,
+since the system-wide figure proved unusable on real hardware with normal
+desktop activity running alongside LM Studio.
+
 ## How it works
 
 Candidate models are **discovered live** by shelling out to

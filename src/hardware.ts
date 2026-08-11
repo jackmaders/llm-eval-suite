@@ -21,13 +21,37 @@ $usedKB = $totalKB - $freeKB
 $ramUsedPercent = [math]::Round(($usedKB / $totalKB) * 100, 2)
 $ramUsedGB = [math]::Round($usedKB / 1MB, 2)
 
-$dedicated = (Get-Counter '\\GPU Adapter Memory(*)\\Dedicated Usage').CounterSamples |
-  Measure-Object -Property CookedValue -Sum
-$shared = (Get-Counter '\\GPU Adapter Memory(*)\\Shared Usage').CounterSamples |
-  Measure-Object -Property CookedValue -Sum
+$dedicatedUsedMB = 0
+$sharedGpuMemoryMB = 0
 
-$dedicatedUsedMB = [math]::Round($dedicated.Sum / 1MB, 2)
-$sharedGpuMemoryMB = [math]::Round($shared.Sum / 1MB, 2)
+# GPU Adapter Memory(*) sums usage system-wide across every process on the
+# machine — not just LM Studio's own engine — confirmed on real hardware: it
+# included the Windows kernel process (pid 4) and 30+ ordinary desktop
+# processes (browser tabs, terminals, Explorer, ...) alongside two distinct
+# adapter LUIDs for what should be one physical GPU (a stale/duplicate driver
+# registration). That made "free VRAM" wildly unreliable — deeply negative
+# even at cpu-only GPU offload, since ordinary desktop GPU usage alone (or
+# the duplicate-LUID double count) swamped the real figure.
+#
+# Scope usage to the actual inference engine's own process instead — this
+# measures what the guardrail actually needs: whether THIS model's own
+# footprint fits, not a whole-desktop VRAM budget shared with everything
+# else running. Note this means dedicatedVramFreeMB is "headroom if only
+# this model were using the GPU", not a literal system-wide free figure —
+# a deliberate tradeoff since the system-wide figure proved unusable.
+$enginePids = Get-Process -Name '*llama*' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id
+if ($enginePids) {
+  $dedicatedSamples = (Get-Counter '\\GPU Process Memory(*)\\Dedicated Usage' -ErrorAction SilentlyContinue).CounterSamples
+  $sharedSamples = (Get-Counter '\\GPU Process Memory(*)\\Shared Usage' -ErrorAction SilentlyContinue).CounterSamples
+  $dedicatedBytes = 0
+  $sharedBytes = 0
+  foreach ($enginePid in $enginePids) {
+    $dedicatedBytes += ($dedicatedSamples | Where-Object { $_.InstanceName -like "pid_\${enginePid}_*" } | Measure-Object -Property CookedValue -Sum).Sum
+    $sharedBytes += ($sharedSamples | Where-Object { $_.InstanceName -like "pid_\${enginePid}_*" } | Measure-Object -Property CookedValue -Sum).Sum
+  }
+  $dedicatedUsedMB = [math]::Round($dedicatedBytes / 1MB, 2)
+  $sharedGpuMemoryMB = [math]::Round($sharedBytes / 1MB, 2)
+}
 
 # Win32_VideoController.AdapterRAM is a 32-bit WMI field that caps/wraps at
 # 4GB for any GPU with more VRAM than that (a well-documented Windows
@@ -40,7 +64,7 @@ $sharedGpuMemoryMB = [math]::Round($shared.Sum / 1MB, 2)
 # discrete GPU. Falls back to AdapterRAM only if the registry read yields
 # nothing (e.g. a non-standard driver).
 $vramTotalMB = 0
-Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue |
+Get-ChildItem 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue |
   ForEach-Object {
     $qwMemorySize = (Get-ItemProperty -Path $_.PSPath -Name 'HardwareInformation.qwMemorySize' -ErrorAction SilentlyContinue).'HardwareInformation.qwMemorySize'
     if ($qwMemorySize -and $qwMemorySize -gt 0) {
