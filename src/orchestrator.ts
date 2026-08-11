@@ -91,6 +91,16 @@ function currentPhases(state: PipelineState, modelKey: string): CompletedPhases 
   return state.completedPhases[modelKey] ?? {};
 }
 
+/**
+ * Every phase runs to completion for one model before moving to the next, so
+ * logs lead with the model name — scanning down the console should read as
+ * one model's whole story at a time, not phase numbers interleaved across
+ * different models.
+ */
+function logPhase(modelKey: string, phase: string, detail: string): void {
+  console.log(`${modelKey} — ${phase}: ${detail}`);
+}
+
 export async function runPipeline(deps: OrchestratorDeps): Promise<OrchestratorResult> {
   const now = deps.now ?? (() => new Date().toISOString());
   const phases = deps.phases ?? ALL_PHASES;
@@ -126,6 +136,8 @@ export async function runPipeline(deps: OrchestratorDeps): Promise<OrchestratorR
       continue;
     }
 
+    console.log(`\n=== ${model.modelKey} ===`);
+
     // Phase 1: High-Speed Ping Filter. Skipped entirely (no run, no discard
     // gate) when 1 isn't in the requested phase set — --phases lets you
     // isolate a single phase (e.g. to see its raw numbers) without the
@@ -133,9 +145,10 @@ export async function runPipeline(deps: OrchestratorDeps): Promise<OrchestratorR
     if (phases.has(1)) {
       if (!(deps.resume && hasCompletedPhase1(state, model.modelKey))) {
         const result = await phase1Fn(model, { runner: deps.runner, client: deps.client });
-        console.log(
-          `[Phase 1] ${model.modelKey}: ${result.tokPerSec.toFixed(2)} tok/sec ` +
-            `(need >= ${PHASE1_MIN_TOK_PER_SEC} tok/sec) — ${result.passed ? "PASS" : "FAIL"}`,
+        logPhase(
+          model.modelKey,
+          "Phase 1",
+          `${result.tokPerSec.toFixed(2)} tok/sec (need >= ${PHASE1_MIN_TOK_PER_SEC} tok/sec) — ${result.passed ? "PASS" : "FAIL"}`,
         );
         state = withPhaseUpdate(
           state,
@@ -158,9 +171,7 @@ export async function runPipeline(deps: OrchestratorDeps): Promise<OrchestratorR
     if (phases.has(2)) {
       if (!(deps.resume && hasCompletedPhase2(state, model.modelKey))) {
         const result = await phase2Fn(model, { runner: deps.runner, client: deps.client });
-        console.log(
-          `[Phase 2] ${model.modelKey}: ${result.passed ? "PASS" : `FAIL — ${result.reason ?? "unknown reason"}`}`,
-        );
+        logPhase(model.modelKey, "Phase 2", result.passed ? "PASS" : `FAIL — ${result.reason ?? "unknown reason"}`);
         state = withPhaseUpdate(
           state,
           model.modelKey,
@@ -181,6 +192,11 @@ export async function runPipeline(deps: OrchestratorDeps): Promise<OrchestratorR
     // Phase 3: Stage-Gate Hyperparameter & Context Tuner
     if (phases.has(3) && !(deps.resume && hasCompletedPhase3(state, model.modelKey))) {
       const profile = await phase3Fn(model, { runner: deps.runner, client: deps.client, hardware: deps.hardware });
+      logPhase(
+        model.modelKey,
+        "Phase 3",
+        `max context ${profile.maxRecommendedContext}, GPU offload ${profile.verifiedGpuOffload}, KV cache ${profile.kvCacheQuant}`,
+      );
       state = withPhaseUpdate(state, model.modelKey, { phase3Profile: profile }, now);
       await saveStateAtomic(deps.statePath, state);
     }
@@ -193,6 +209,12 @@ export async function runPipeline(deps: OrchestratorDeps): Promise<OrchestratorR
         workspaceRoot: deps.dataDir,
         baseUrl: deps.baseUrl,
       });
+      logPhase(
+        model.modelKey,
+        "Phase 4",
+        `${metrics.passRatePercent.toFixed(1)}% pass rate, ${metrics.syntaxErrorCount} syntax errors, ` +
+          `decode ${metrics.avgDecodeSpeed.toFixed(1)} tok/s (decay ${metrics.thermalDecayPercent.toFixed(1)}%)`,
+      );
       state = withPhaseUpdate(state, model.modelKey, { phase4Metrics: metrics }, now);
       await saveStateAtomic(deps.statePath, state);
     }

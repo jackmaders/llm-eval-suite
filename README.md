@@ -72,6 +72,19 @@ runs, so a run where every model gets discarded is diagnosable without
 digging through state files: a `0.00 tok/sec` reading across the board means
 the measurement pipeline is broken, not that every model is genuinely slow.
 
+Console output is grouped by model, in the order the pipeline actually runs
+each one through all four phases, rather than by phase number — every log
+line leads with the model name so a long run reads top-to-bottom as one
+model's whole story before moving to the next:
+
+```
+=== qwen2.5-coder-32b-instruct ===
+qwen2.5-coder-32b-instruct — Phase 1: 23.40 tok/sec (need >= 10 tok/sec) — PASS
+qwen2.5-coder-32b-instruct — Phase 2: PASS
+qwen2.5-coder-32b-instruct — Phase 3: max context 32768, GPU offload max, KV cache Q8_0
+qwen2.5-coder-32b-instruct — Phase 4: 86.7% pass rate, 1 syntax errors, decode 24.5 tok/s (decay 3.2%)
+```
+
 ## Prerequisites
 
 - [Bun](https://bun.sh) 1.3+
