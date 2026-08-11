@@ -36,7 +36,8 @@ async function main(): Promise<void> {
     });
 
     const evaluated = Object.keys(state.completedPhases).length;
-    console.log(`Done. Evaluated ${evaluated} model(s).`);
+    const errored = Object.values(state.completedPhases).filter((p) => p.discardedAt?.startsWith("ERRORED_PHASE")).length;
+    console.log(`Done. Evaluated ${evaluated} model(s)${errored > 0 ? ` (${errored} errored — see the report's Errors section)` : ""}.`);
     console.log(`Report written to ${reportPath}`);
   } catch (err) {
     if (err instanceof ServerCrashError) {

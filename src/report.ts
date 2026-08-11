@@ -27,6 +27,10 @@ function quantNoteLabel(profile: CompletedPhases["phase3Profile"]): string {
   return rec.suggestedQuant ? `${arrow} try ${rec.suggestedQuant}` : `${arrow} ${rec.direction}`;
 }
 
+function isErroredAt(phases: CompletedPhases, phaseNum: 1 | 2): boolean {
+  return phases.discardedAt === `ERRORED_PHASE${phaseNum}`;
+}
+
 /**
  * Always surfaces the measured tok/sec alongside pass/fail, not just on
  * failure — the whole point is to make it possible to tell "actually slow"
@@ -34,12 +38,14 @@ function quantNoteLabel(profile: CompletedPhases["phase3Profile"]): string {
  * digging through logs.
  */
 function phase1Cell(phases: CompletedPhases): string {
+  if (isErroredAt(phases, 1)) return "Error (see Errors section)";
   if (phases.phase1Passed === undefined) return PLACEHOLDER;
   const speed = phases.phase1TokPerSec !== undefined ? `${round1(phases.phase1TokPerSec)} tok/s` : PLACEHOLDER;
   return `${phases.phase1Passed ? "Pass" : "Fail"} (${speed})`;
 }
 
 function phase2Cell(phases: CompletedPhases): string {
+  if (isErroredAt(phases, 2)) return "Error (see Errors section)";
   if (phases.phase2Passed === undefined) return PLACEHOLDER;
   if (phases.phase2Passed) return "Pass";
   return phases.phase2Reason ? `Fail (${phases.phase2Reason})` : "Fail";
@@ -76,6 +82,26 @@ function renderQuantizationNotes(modelKeys: string[], completedPhases: PipelineS
 
   if (notes.length === 0) return [];
   return ["", "## Quantization Notes", "", ...notes];
+}
+
+/**
+ * Lists every model whose evaluation stopped because a phase itself threw
+ * (most commonly LM Studio's engine crashing on that specific model) rather
+ * than returning a normal pass/fail — distinct from Quantization Notes,
+ * which is about a model that completed evaluation but might do better at a
+ * different quant.
+ */
+function renderErrorsSection(modelKeys: string[], completedPhases: PipelineState["completedPhases"]): string[] {
+  const errors = modelKeys.flatMap((modelKey) => {
+    const phases = completedPhases[modelKey];
+    const discardedAt = phases?.discardedAt;
+    if (!discardedAt?.startsWith("ERRORED_PHASE")) return [];
+    const phaseNum = discardedAt.slice("ERRORED_PHASE".length);
+    return [`- **${modelKey}** (Phase ${phaseNum}): ${phases?.errorMessage ?? "unknown error"}`];
+  });
+
+  if (errors.length === 0) return [];
+  return ["", "## Errors", "", ...errors];
 }
 
 /** Renders the full comparison report written to data/report_<timestamp>.md. */
@@ -116,6 +142,7 @@ export function generateMarkdownReport(state: PipelineState): string {
       "it (lmstudio-ai/lmstudio-bug-tracker#1462); see the Quant Note column/section below for what to try instead._",
   );
   lines.push(...renderQuantizationNotes(modelKeys, state.completedPhases));
+  lines.push(...renderErrorsSection(modelKeys, state.completedPhases));
 
   return lines.join("\n");
 }

@@ -276,6 +276,78 @@ describe("runPipeline", () => {
     expect(persisted?.completedPhases["model-b"]?.phase1Passed).toBeUndefined();
   });
 
+  test("continues to the next model when one throws a non-ServerCrashError (e.g. an engine crash)", async () => {
+    // Reported: LM Studio's llama-server backend crashed loading one
+    // specific model (exit code 0xC0000409 / STATUS_STACK_BUFFER_OVERRUN) —
+    // an engine crash, not a dead server — and it took the whole multi-model
+    // run down with it instead of just discarding that one model.
+    const models: ModelConfig[] = [
+      { modelKey: "model-crashes", quant: "Q4_K_M" },
+      { modelKey: "model-b", quant: "Q4_K_M" },
+    ];
+    const { paths, deps } = baseDeps(models);
+
+    const calls: string[] = [];
+    const result = await runPipeline({
+      ...deps,
+      phase1: async (m) => {
+        calls.push(`phase1:${m.modelKey}`);
+        if (m.modelKey === "model-crashes") {
+          throw new Error(
+            "lms load model-crashes failed (exit 1): Error: Engine protocol runtime llama-server exited before becoming healthy. exitCode=3221226505, signal=null",
+          );
+        }
+        return { modelKey: m.modelKey, tokPerSec: 20, passed: true };
+      },
+      phase2: async (m) => ({ modelKey: m.modelKey, passed: true }),
+      phase3: async (m) => ({
+        modelKey: m.modelKey,
+        quant: m.quant,
+        verifiedGpuOffload: "max",
+        kvCacheQuant: "Q8_0" as const,
+        maxRecommendedContext: 8192,
+        ladderHistory: [],
+      }),
+      phase4: async (m) => ({
+        modelKey: m.modelKey,
+        passRatePercent: 100,
+        syntaxErrorCount: 0,
+        avgDecodeSpeed: 10,
+        thermalDecayPercent: 0,
+        workspaceDir: "/tmp/x",
+      }),
+    });
+
+    // Did not throw — the run completed despite one model's engine crash.
+    expect(calls).toEqual(["phase1:model-crashes", "phase1:model-b"]);
+    expect(result.state.completedPhases["model-crashes"]?.discardedAt).toBe("ERRORED_PHASE1");
+    expect(result.state.completedPhases["model-crashes"]?.errorMessage).toContain("exitCode=3221226505");
+    expect(result.state.completedPhases["model-b"]?.phase4Metrics).toBeDefined();
+
+    const persisted = await loadState(paths.statePath);
+    expect(persisted?.completedPhases["model-crashes"]?.discardedAt).toBe("ERRORED_PHASE1");
+  });
+
+  test("tags the error with whichever phase actually threw", async () => {
+    const models: ModelConfig[] = [{ modelKey: "model-a", quant: "Q4_K_M" }];
+    const { deps } = baseDeps(models);
+
+    const result = await runPipeline({
+      ...deps,
+      phase1: async (m) => ({ modelKey: m.modelKey, tokPerSec: 20, passed: true }),
+      phase2: async (m) => ({ modelKey: m.modelKey, passed: true }),
+      phase3: async () => {
+        throw new Error("engine crashed during context ladder");
+      },
+      phase4: async () => {
+        throw new Error("should not run — phase 3 already errored");
+      },
+    });
+
+    expect(result.state.completedPhases["model-a"]?.discardedAt).toBe("ERRORED_PHASE3");
+    expect(result.state.completedPhases["model-a"]?.errorMessage).toBe("engine crashed during context ladder");
+  });
+
   test("--phases restricts which phases run and skips the discard gate for phases not requested", async () => {
     const models: ModelConfig[] = [{ modelKey: "model-a", quant: "Q4_K_M" }];
     const { deps } = baseDeps(models);

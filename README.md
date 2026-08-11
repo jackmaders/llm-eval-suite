@@ -66,6 +66,17 @@ despite requesting the same modelKey. Phase 3 also reloads at
 so whatever's left loaded for Phase 4 always matches what the report says was
 recommended, not the over-limit rung that tripped the guardrail.
 
+If a phase throws instead of returning a normal pass/fail — most commonly LM
+Studio's `llama-server` engine crashing outright while loading or running one
+specific model — that model alone is recorded as errored (`ERRORED_PHASE1`
+through `ERRORED_PHASE4`, with the raw error message) and evaluation moves on
+to the next model, rather than losing every other candidate's results to one
+bad model. Only a genuinely dead/unreachable LM Studio *server* — a
+`ServerCrashError`, checked via a health-check before each run and surfaced
+whenever the HTTP API can't be reached — still aborts the whole run, since no
+other model could be evaluated either in that case. The report's Errors
+section lists exactly which phase failed and why for every errored model.
+
 Results are written incrementally to `data/.pipeline_state.json` (atomic
 write-then-rename, so a crash never leaves a truncated file), and a
 `data/report_<timestamp>.md` comparison report is generated at the end of the

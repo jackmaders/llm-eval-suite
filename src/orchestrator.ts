@@ -4,7 +4,7 @@
 
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import type { LmStudioClient } from "./apiClient";
+import { ServerCrashError, type LmStudioClient } from "./apiClient";
 import { discoverModels } from "./config";
 import type { HardwareProvider } from "./phases/phase3";
 import { PHASE1_MIN_TOK_PER_SEC, runPhase1 } from "./phases/phase1";
@@ -145,92 +145,126 @@ export async function runPipeline(deps: OrchestratorDeps): Promise<OrchestratorR
 
     console.log(`\n=== ${model.modelKey} (${model.quant}) ===`);
 
-    // Phase 1: High-Speed Ping Filter. Skipped entirely (no run, no discard
-    // gate) when 1 isn't in the requested phase set — --phases lets you
-    // isolate a single phase (e.g. to see its raw numbers) without the
-    // pipeline treating an un-run earlier phase as a failure.
-    if (phases.has(1)) {
-      if (!(deps.resume && hasCompletedPhase1(state, model.modelKey))) {
-        const result = await phase1Fn(model, { runner: deps.runner, client: deps.client });
+    // Tracks which phase we're inside for error reporting below — a thrown
+    // error (as opposed to a phase returning a normal pass/fail result)
+    // means that phase itself blew up, most commonly LM Studio's engine
+    // (llama-server) crashing while loading or running this specific model.
+    let currentPhaseForError: PhaseNumber | undefined;
+
+    try {
+      // Phase 1: High-Speed Ping Filter. Skipped entirely (no run, no
+      // discard gate) when 1 isn't in the requested phase set — --phases
+      // lets you isolate a single phase (e.g. to see its raw numbers)
+      // without the pipeline treating an un-run earlier phase as a failure.
+      if (phases.has(1)) {
+        currentPhaseForError = 1;
+        if (!(deps.resume && hasCompletedPhase1(state, model.modelKey))) {
+          const result = await phase1Fn(model, { runner: deps.runner, client: deps.client });
+          logPhase(
+            model.modelKey,
+            "Phase 1",
+            `${result.passed ? "PASS" : "FAIL"} - ${result.tokPerSec.toFixed(2)} tok/sec (need >= ${PHASE1_MIN_TOK_PER_SEC} tok/sec)`,
+          );
+          state = withPhaseUpdate(
+            state,
+            model.modelKey,
+            { phase1Passed: result.passed, phase1TokPerSec: result.tokPerSec },
+            now,
+          );
+          await saveStateAtomic(deps.statePath, state);
+        }
+        modelPhases = currentPhases(state, model.modelKey);
+        if (!modelPhases.phase1Passed) {
+          state = withPhaseUpdate(state, model.modelKey, { discardedAt: "DISCARDED_PHASE1" }, now);
+          await saveStateAtomic(deps.statePath, state);
+          await unloadAll(deps.runner);
+          continue;
+        }
+      }
+
+      // Phase 2: Capability & Sanity Filter
+      if (phases.has(2)) {
+        currentPhaseForError = 2;
+        if (!(deps.resume && hasCompletedPhase2(state, model.modelKey))) {
+          const result = await phase2Fn(model, {
+            runner: deps.runner,
+            client: deps.client,
+            failureLogDir: join(deps.dataDir, "phase2-failures"),
+          });
+          logPhase(model.modelKey, "Phase 2", result.passed ? "PASS" : `FAIL - ${result.reason ?? "unknown reason"}`);
+          if (!result.passed) {
+            console.log(`${model.modelKey} — raw Phase 2 response saved to ${join(deps.dataDir, "phase2-failures")}`);
+          }
+          state = withPhaseUpdate(
+            state,
+            model.modelKey,
+            { phase2Passed: result.passed, phase2Reason: result.reason },
+            now,
+          );
+          await saveStateAtomic(deps.statePath, state);
+        }
+        modelPhases = currentPhases(state, model.modelKey);
+        if (!modelPhases.phase2Passed) {
+          state = withPhaseUpdate(state, model.modelKey, { discardedAt: "DISCARDED_PHASE2" }, now);
+          await saveStateAtomic(deps.statePath, state);
+          await unloadAll(deps.runner);
+          continue;
+        }
+      }
+
+      // Phase 3: Stage-Gate Hyperparameter & Context Tuner
+      if (phases.has(3) && !(deps.resume && hasCompletedPhase3(state, model.modelKey))) {
+        currentPhaseForError = 3;
+        const profile = await phase3Fn(model, { runner: deps.runner, client: deps.client, hardware: deps.hardware });
         logPhase(
           model.modelKey,
-          "Phase 1",
-          `${result.passed ? "PASS" : "FAIL"} - ${result.tokPerSec.toFixed(2)} tok/sec (need >= ${PHASE1_MIN_TOK_PER_SEC} tok/sec)`,
+          "Phase 3",
+          `max context ${profile.maxRecommendedContext}, GPU offload ${profile.verifiedGpuOffload}, KV cache ${profile.kvCacheQuant}`,
         );
-        state = withPhaseUpdate(
-          state,
-          model.modelKey,
-          { phase1Passed: result.passed, phase1TokPerSec: result.tokPerSec },
-          now,
-        );
+        state = withPhaseUpdate(state, model.modelKey, { phase3Profile: profile }, now);
         await saveStateAtomic(deps.statePath, state);
       }
-      modelPhases = currentPhases(state, model.modelKey);
-      if (!modelPhases.phase1Passed) {
-        state = withPhaseUpdate(state, model.modelKey, { discardedAt: "DISCARDED_PHASE1" }, now);
-        await saveStateAtomic(deps.statePath, state);
-        await unloadAll(deps.runner);
-        continue;
-      }
-    }
 
-    // Phase 2: Capability & Sanity Filter
-    if (phases.has(2)) {
-      if (!(deps.resume && hasCompletedPhase2(state, model.modelKey))) {
-        const result = await phase2Fn(model, {
+      // Phase 4: Standardized Aider Refactoring Benchmark
+      if (phases.has(4) && !(deps.resume && hasCompletedPhase4(state, model.modelKey))) {
+        currentPhaseForError = 4;
+        const metrics = await phase4Fn(model, {
           runner: deps.runner,
           client: deps.client,
-          failureLogDir: join(deps.dataDir, "phase2-failures"),
+          workspaceRoot: deps.dataDir,
+          baseUrl: deps.baseUrl,
         });
-        logPhase(model.modelKey, "Phase 2", result.passed ? "PASS" : `FAIL - ${result.reason ?? "unknown reason"}`);
-        if (!result.passed) {
-          console.log(`${model.modelKey} — raw Phase 2 response saved to ${join(deps.dataDir, "phase2-failures")}`);
-        }
-        state = withPhaseUpdate(
-          state,
+        logPhase(
           model.modelKey,
-          { phase2Passed: result.passed, phase2Reason: result.reason },
-          now,
+          "Phase 4",
+          `${metrics.passRatePercent.toFixed(1)}% pass rate, ${metrics.syntaxErrorCount} syntax errors, ` +
+            `decode ${metrics.avgDecodeSpeed.toFixed(1)} tok/s (decay ${metrics.thermalDecayPercent.toFixed(1)}%)`,
         );
+        state = withPhaseUpdate(state, model.modelKey, { phase4Metrics: metrics }, now);
         await saveStateAtomic(deps.statePath, state);
       }
-      modelPhases = currentPhases(state, model.modelKey);
-      if (!modelPhases.phase2Passed) {
-        state = withPhaseUpdate(state, model.modelKey, { discardedAt: "DISCARDED_PHASE2" }, now);
-        await saveStateAtomic(deps.statePath, state);
+    } catch (err) {
+      // A dead/unbound LM Studio server is systemic — no other model can be
+      // evaluated either, so this alone still aborts the whole run. Anything
+      // else (most commonly the engine crashing on this one model) discards
+      // just this model and moves on, rather than losing every other
+      // candidate's results to one bad load.
+      if (err instanceof ServerCrashError) throw err;
+
+      const message = err instanceof Error ? err.message : String(err);
+      const phaseTag = `ERRORED_PHASE${currentPhaseForError ?? 1}` as const;
+      console.error(`${model.modelKey} — ERROR in Phase ${currentPhaseForError ?? "?"}: ${message}`);
+      state = withPhaseUpdate(state, model.modelKey, { discardedAt: phaseTag, errorMessage: message }, now);
+      await saveStateAtomic(deps.statePath, state);
+
+      try {
         await unloadAll(deps.runner);
-        continue;
+      } catch (unloadErr) {
+        console.warn(
+          `WARNING: cleanup unload after the above error also failed: ${unloadErr instanceof Error ? unloadErr.message : unloadErr}`,
+        );
       }
-    }
-
-    // Phase 3: Stage-Gate Hyperparameter & Context Tuner
-    if (phases.has(3) && !(deps.resume && hasCompletedPhase3(state, model.modelKey))) {
-      const profile = await phase3Fn(model, { runner: deps.runner, client: deps.client, hardware: deps.hardware });
-      logPhase(
-        model.modelKey,
-        "Phase 3",
-        `max context ${profile.maxRecommendedContext}, GPU offload ${profile.verifiedGpuOffload}, KV cache ${profile.kvCacheQuant}`,
-      );
-      state = withPhaseUpdate(state, model.modelKey, { phase3Profile: profile }, now);
-      await saveStateAtomic(deps.statePath, state);
-    }
-
-    // Phase 4: Standardized Aider Refactoring Benchmark
-    if (phases.has(4) && !(deps.resume && hasCompletedPhase4(state, model.modelKey))) {
-      const metrics = await phase4Fn(model, {
-        runner: deps.runner,
-        client: deps.client,
-        workspaceRoot: deps.dataDir,
-        baseUrl: deps.baseUrl,
-      });
-      logPhase(
-        model.modelKey,
-        "Phase 4",
-        `${metrics.passRatePercent.toFixed(1)}% pass rate, ${metrics.syntaxErrorCount} syntax errors, ` +
-          `decode ${metrics.avgDecodeSpeed.toFixed(1)} tok/s (decay ${metrics.thermalDecayPercent.toFixed(1)}%)`,
-      );
-      state = withPhaseUpdate(state, model.modelKey, { phase4Metrics: metrics }, now);
-      await saveStateAtomic(deps.statePath, state);
+      continue;
     }
 
     await unloadAll(deps.runner);

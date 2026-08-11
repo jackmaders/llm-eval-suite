@@ -56,7 +56,16 @@ export interface CompletedPhases {
   phase2Reason?: string;
   phase3Profile?: Phase3TuningProfile;
   phase4Metrics?: BenchmarkMetrics;
-  discardedAt?: "DISCARDED_PHASE1" | "DISCARDED_PHASE2";
+  /**
+   * DISCARDED_* means the phase ran and legitimately failed its gate (too
+   * slow, invalid JSON, ...). ERRORED_* means the phase itself threw instead
+   * of returning a result — most commonly the LM Studio engine (llama-server)
+   * crashing while loading or running this specific model. Either way the
+   * model is done being evaluated this run; errorMessage carries detail for
+   * the ERRORED_* case.
+   */
+  discardedAt?: "DISCARDED_PHASE1" | "DISCARDED_PHASE2" | "ERRORED_PHASE1" | "ERRORED_PHASE2" | "ERRORED_PHASE3" | "ERRORED_PHASE4";
+  errorMessage?: string;
 }
 
 export interface PipelineState {

@@ -106,6 +106,29 @@ describe("generateMarkdownReport", () => {
     expect(report).toContain("Fail (output did not contain valid JSON)");
   });
 
+  test("shows an Errors section and an Error cell for a model whose phase threw", () => {
+    const report = generateMarkdownReport({
+      lastUpdated: "now",
+      completedPhases: {
+        "model-crashes": {
+          quant: "Q4_K_M",
+          discardedAt: "ERRORED_PHASE1",
+          errorMessage: "Engine protocol runtime llama-server exited before becoming healthy. exitCode=3221226505",
+        },
+      },
+    });
+    expect(report).toContain("## Errors");
+    expect(report).toContain("model-crashes");
+    expect(report).toContain("Phase 1");
+    expect(report).toContain("exitCode=3221226505");
+    expect(report).toContain("Error (see Errors section)");
+  });
+
+  test("has no Errors section when nothing errored", () => {
+    const report = generateMarkdownReport(state);
+    expect(report).not.toContain("## Errors");
+  });
+
   test("uses a placeholder for phases that have not run yet", () => {
     const partial: PipelineState = {
       lastUpdated: "now",
