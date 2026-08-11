@@ -88,7 +88,10 @@ moment a model is discarded.
    stop those checks from running at all. Console logs show exactly when
    aider starts, the full command (with the long `--message` body summarized
    to its length), and how long it ran before finishing or hitting the
-   timeout.
+   timeout — and aider's own stdout/stderr are streamed live into the
+   console as it runs (`CommandRunner`'s opt-in `streamOutput` option, in
+   `src/subprocess.ts`), not just captured silently until it finishes, so a
+   long Phase 4 run has visible progress instead of a 15-minute silence.
 
 Every load — Phase 1, Phase 2, and each rung of Phase 3's offload/context
 ladders — unloads whatever's currently loaded first. `lms load` on top of an

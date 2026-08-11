@@ -455,7 +455,7 @@ export async function runPhase4(
   );
   const aiderStartedAt = Date.now();
   try {
-    await deps.runner.run("aider", aiderArgs, { cwd: workspaceDir, timeoutMs: AIDER_TIMEOUT_MS });
+    await deps.runner.run("aider", aiderArgs, { cwd: workspaceDir, timeoutMs: AIDER_TIMEOUT_MS, streamOutput: true });
     console.log(`${model.modelKey} — Phase 4: aider finished in ${((Date.now() - aiderStartedAt) / 1000).toFixed(1)}s`);
   } catch (err) {
     // A run that hits the 15-minute cap is expected for slower models — grade

@@ -20,4 +20,43 @@ describe("BunCommandRunner", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("");
   });
+
+  describe("streamOutput", () => {
+    // Reported: nothing was visible in the console between "running aider..."
+    // and either completion or the 15-minute timeout, since stdout/stderr
+    // were only ever buffered for the final CommandResult, never echoed live.
+    function captureStdout(): { get: () => string; restore: () => void } {
+      const original = process.stdout.write.bind(process.stdout);
+      let captured = "";
+      process.stdout.write = ((chunk: string | Uint8Array) => {
+        captured += chunk.toString();
+        return true;
+      }) as typeof process.stdout.write;
+      return { get: () => captured, restore: () => (process.stdout.write = original) };
+    }
+
+    test("echoes stdout live to our own process while still buffering it in the result", async () => {
+      const capture = captureStdout();
+      try {
+        const runner = new BunCommandRunner();
+        const result = await runner.run("echo", ["hello-stream"], { streamOutput: true });
+        expect(result.stdout).toContain("hello-stream");
+        expect(capture.get()).toContain("hello-stream");
+      } finally {
+        capture.restore();
+      }
+    });
+
+    test("does not echo anything when streamOutput is omitted (default, unchanged behavior)", async () => {
+      const capture = captureStdout();
+      try {
+        const runner = new BunCommandRunner();
+        const result = await runner.run("echo", ["hello-no-stream"]);
+        expect(result.stdout).toContain("hello-no-stream");
+        expect(capture.get()).not.toContain("hello-no-stream");
+      } finally {
+        capture.restore();
+      }
+    });
+  });
 });
