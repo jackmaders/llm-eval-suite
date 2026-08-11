@@ -66,6 +66,22 @@ describe("buildAiderArgs", () => {
     expect(args).toContain("http://127.0.0.1:1234/v1");
     for (const p of problems) expect(args).toContain(p.fileName);
   });
+
+  test("passes a dummy --openai-api-key, without which aider fails sending an empty Bearer token", () => {
+    // Confirmed against aider's own LM Studio docs: LM_STUDIO_API_KEY/
+    // OPENAI_API_KEY "must have a dummy value... or the client request will
+    // fail trying to send an empty Bearer token", even though LM Studio
+    // itself doesn't check it.
+    const args = buildAiderArgs(buildMiniPolyglotSubset(), "http://127.0.0.1:1234/v1", model.modelKey);
+    const keyIndex = args.indexOf("--openai-api-key");
+    expect(keyIndex).toBeGreaterThanOrEqual(0);
+    expect(args[keyIndex + 1]).toBeTruthy();
+  });
+
+  test("prefixes the model with openai/ for LiteLLM's provider routing", () => {
+    const args = buildAiderArgs(buildMiniPolyglotSubset(), "http://127.0.0.1:1234/v1", model.modelKey);
+    expect(args).toContain(`openai/${model.modelKey}`);
+  });
 });
 
 describe("runPhase4", () => {

@@ -364,6 +364,14 @@ export async function prepareWorkspace(
   });
 }
 
+/**
+ * Verified against aider's own docs (aider.chat/docs/llms/openai-compat.html,
+ * aider.chat/docs/config/options.html): --openai-api-base + --model openai/<name>
+ * is the correct, current, non-deprecated way to point aider at any
+ * OpenAI-compatible server, including LM Studio's. --openai-api-key is
+ * required even though LM Studio doesn't check it — aider's HTTP client
+ * fails outright trying to send an empty Bearer token without one.
+ */
 export function buildAiderArgs(problems: PolyglotProblem[], baseUrl: string, modelKey: string): string[] {
   const message = [
     "Fix the bug described for each file below. Do not change anything else.",
@@ -375,6 +383,8 @@ export function buildAiderArgs(problems: PolyglotProblem[], baseUrl: string, mod
     "--no-auto-commits",
     "--openai-api-base",
     baseUrl,
+    "--openai-api-key",
+    "dummy-api-key",
     "--model",
     `openai/${modelKey}`,
     "--message",
