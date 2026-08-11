@@ -73,6 +73,66 @@ describe("loadModel", () => {
     };
     await expect(loadModel(runner, "model-a", { contextLength: 4096 })).rejects.toThrow(/out of memory/);
   });
+
+  test("retries without --kv-cache-quant when the installed lms version doesn't support it", async () => {
+    // Reported: `lms load ... failed (exit 1): error: unknown option '--kv-cache-quant'`
+    // on an older lms CLI that predates the flag — this should degrade
+    // gracefully (load without KV cache quantization) instead of aborting
+    // the entire run over one unsupported flag.
+    const calls: Array<{ cmd: string; args: string[] }> = [];
+    let loadAttempts = 0;
+    const runner: CommandRunner = {
+      run: async (cmd, args) => {
+        calls.push({ cmd, args });
+        if (args[0] === "unload") return { stdout: "", stderr: "", exitCode: 0 };
+        loadAttempts++;
+        if (loadAttempts === 1) {
+          return { stdout: "", stderr: "error: unknown option '--kv-cache-quant'", exitCode: 1 };
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    };
+
+    await loadModel(runner, "model-a", { contextLength: 8192, kvCacheQuant: "Q8_0" });
+
+    expect(loadAttempts).toBe(2);
+    const loadCalls = calls.filter((c) => c.args[0] === "load");
+    expect(loadCalls[0]?.args).toContain("--kv-cache-quant");
+    expect(loadCalls[1]?.args).not.toContain("--kv-cache-quant");
+    expect(loadCalls[1]?.args).not.toContain("Q8_0");
+  });
+
+  test("does not retry (and still throws) when the load failure is unrelated to --kv-cache-quant", async () => {
+    let loadAttempts = 0;
+    const runner: CommandRunner = {
+      run: async (cmd, args) => {
+        if (args[0] === "unload") return { stdout: "", stderr: "", exitCode: 0 };
+        loadAttempts++;
+        return { stdout: "", stderr: "out of memory", exitCode: 1 };
+      },
+    };
+
+    await expect(
+      loadModel(runner, "model-a", { contextLength: 8192, kvCacheQuant: "Q8_0" }),
+    ).rejects.toThrow(/out of memory/);
+    expect(loadAttempts).toBe(1);
+  });
+
+  test("does not retry when the load failed for another unknown-option flag", async () => {
+    let loadAttempts = 0;
+    const runner: CommandRunner = {
+      run: async (cmd, args) => {
+        if (args[0] === "unload") return { stdout: "", stderr: "", exitCode: 0 };
+        loadAttempts++;
+        return { stdout: "", stderr: "error: unknown option '--gpu'", exitCode: 1 };
+      },
+    };
+
+    await expect(
+      loadModel(runner, "model-a", { contextLength: 8192, kvCacheQuant: "Q8_0" }),
+    ).rejects.toThrow(/unknown option '--gpu'/);
+    expect(loadAttempts).toBe(1);
+  });
 });
 
 describe("unloadAll", () => {

@@ -15,6 +15,25 @@ async function runUnloadAll(runner: CommandRunner) {
   return runner.run("lms", ["unload", "--all"]);
 }
 
+function buildLoadArgs(modelKey: string, opts: LoadModelOptions): string[] {
+  const args = ["load", modelKey, "--context-length", String(opts.contextLength)];
+  if (opts.kvCacheQuant) {
+    args.push("--kv-cache-quant", opts.kvCacheQuant);
+  }
+  if (opts.gpuOffloadLayers !== undefined) {
+    args.push("--gpu", String(opts.gpuOffloadLayers));
+  }
+  // Unattended: never block waiting for an interactive confirmation prompt.
+  args.push("--yes");
+  return args;
+}
+
+/** True when stderr reports that `lms` doesn't recognize the given flag on this CLI version. */
+function isUnknownOptionError(stderr: string, flag: string): boolean {
+  const escaped = flag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`unknown option ['"]?${escaped}\\b`, "i").test(stderr);
+}
+
 export async function loadModel(runner: CommandRunner, modelKey: string, opts: LoadModelOptions): Promise<void> {
   // Unload whatever's currently loaded first. `lms load` on top of an
   // already-loaded model can stack a second instance alongside it — or leave
@@ -32,18 +51,19 @@ export async function loadModel(runner: CommandRunner, modelKey: string, opts: L
     );
   }
 
-  const args = ["load", modelKey, "--context-length", String(opts.contextLength)];
+  let result = await runner.run("lms", buildLoadArgs(modelKey, opts));
 
-  if (opts.kvCacheQuant) {
-    args.push("--kv-cache-quant", opts.kvCacheQuant);
+  // Older `lms` CLI versions predate --kv-cache-quant and reject it outright
+  // rather than ignoring it. Rather than aborting the whole run over one
+  // unsupported flag, retry once without it — Q8_0 KV cache quantization
+  // just won't be applied for this model on this LM Studio install.
+  if (result.exitCode !== 0 && opts.kvCacheQuant && isUnknownOptionError(result.stderr, "--kv-cache-quant")) {
+    console.warn(
+      `WARNING: this \`lms\` CLI does not support --kv-cache-quant; retrying "${modelKey}" without KV cache quantization.`,
+    );
+    result = await runner.run("lms", buildLoadArgs(modelKey, { ...opts, kvCacheQuant: undefined }));
   }
-  if (opts.gpuOffloadLayers !== undefined) {
-    args.push("--gpu", String(opts.gpuOffloadLayers));
-  }
-  // Unattended: never block waiting for an interactive confirmation prompt.
-  args.push("--yes");
 
-  const result = await runner.run("lms", args);
   if (result.exitCode !== 0) {
     throw new Error(`lms load ${modelKey} failed (exit ${result.exitCode}): ${result.stderr}`);
   }
